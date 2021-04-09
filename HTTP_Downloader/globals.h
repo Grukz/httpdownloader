@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -99,6 +99,19 @@
 #define PROGRAM_CAPTION_A	"HTTP Downloader"
 
 #define HOME_PAGE			L"https://erickutcher.github.io/#HTTP_Downloader"
+#define CHANGELOG			L"https://raw.githubusercontent.com/erickutcher/httpdownloader/master/HTTP_Downloader/changelog.txt"
+
+#define UPDATE_CHECK_URL	"https://raw.githubusercontent.com/erickutcher/httpdownloader/master/HTTP_Downloader/version.txt"
+
+#define CURRENT_VERSION_A	1
+#define CURRENT_VERSION_B	0
+#define CURRENT_VERSION_C	3
+#define CURRENT_VERSION_D	8
+
+#define CURRENT_VERSION		( ( CURRENT_VERSION_A << 24 ) | \
+							  ( CURRENT_VERSION_B << 16 ) | \
+							  ( CURRENT_VERSION_C << 8 )  | \
+							  ( CURRENT_VERSION_D ) )
 
 #define SIZE_FORMAT_BYTE		0
 #define SIZE_FORMAT_KILOBYTE	1
@@ -110,13 +123,14 @@
 #define SIZE_FORMAT_AUTO		7
 
 #define SHUTDOWN_ACTION_NONE				0
-#define SHUTDOWN_ACTION_LOG_OFF				1
-#define SHUTDOWN_ACTION_LOCK				2
-#define SHUTDOWN_ACTION_RESTART				3
-#define SHUTDOWN_ACTION_SLEEP				4
-#define SHUTDOWN_ACTION_HIBERNATE			5
-#define SHUTDOWN_ACTION_SHUT_DOWN			6
-#define SHUTDOWN_ACTION_HYBRID_SHUT_DOWN	7
+#define SHUTDOWN_ACTION_EXIT_PROGRAM		1
+#define SHUTDOWN_ACTION_LOG_OFF				2
+#define SHUTDOWN_ACTION_LOCK				3
+#define SHUTDOWN_ACTION_RESTART				4
+#define SHUTDOWN_ACTION_SLEEP				5
+#define SHUTDOWN_ACTION_HIBERNATE			6
+#define SHUTDOWN_ACTION_SHUT_DOWN			7
+#define SHUTDOWN_ACTION_HYBRID_SHUT_DOWN	8
 
 #define DRAG_AND_DROP_ACTION_NONE					0
 #define DRAG_AND_DROP_ACTION_DOWNLOAD_IMMEDIATELY	1
@@ -168,6 +182,10 @@ struct CL_ARGS
 	wchar_t *data;
 	wchar_t *username;
 	wchar_t *password;
+	wchar_t *proxy_hostname;
+	wchar_t *proxy_username;
+	wchar_t *proxy_password;
+	unsigned long proxy_ip_address;
 	int download_directory_length;
 	int download_history_file_length;
 	int url_list_file_length;
@@ -177,10 +195,19 @@ struct CL_ARGS
 	int data_length;
 	int username_length;
 	int password_length;
+	int proxy_hostname_length;
+	int proxy_username_length;
+	int proxy_password_length;
+	unsigned short proxy_port;
 	unsigned char parts;
 	unsigned char download_operations;
 	unsigned char download_immediately;
+	unsigned char proxy_type;
 	char ssl_version;
+	bool proxy_resolve_domain_names;	// v4a or v5 based on proxy_type
+	bool use_download_speed_limit;
+	bool use_download_directory;
+	bool use_parts;
 };
 
 struct FONT_SETTINGS
@@ -201,12 +228,19 @@ extern HWND g_hWnd_search;
 extern HWND g_hWnd_download_speed_limit;
 extern HWND g_hWnd_url_drop_window;
 
-extern HWND g_hWnd_login_manager;
-extern HWND g_hWnd_login_list;
+extern HWND g_hWnd_check_for_updates;
+
+extern HWND g_hWnd_fingerprint_prompt;
+
+extern HWND g_hWnd_site_manager;
+extern HWND g_hWnd_site_list;
+
+extern HWND g_hWnd_sftp_fps_host_list;
+extern HWND g_hWnd_sftp_keys_host_list;
 
 extern HWND g_hWnd_toolbar;
 extern HWND g_hWnd_status;
-extern HWND g_hWnd_files;
+extern HWND g_hWnd_tlv_files;
 
 extern HWND g_hWnd_active;				// Handle to the active window. Used to handle tab stops.
 
@@ -215,16 +249,16 @@ extern HFONT g_hFont;
 
 extern dllrbt_tree *g_icon_handles;
 
-extern dllrbt_tree *g_login_info;
+extern dllrbt_tree *g_site_info;
+extern dllrbt_tree *g_sftp_fps_host_info;
+extern dllrbt_tree *g_sftp_keys_host_info;
 
 extern bool	g_can_fast_allocate;			// Prevent the pre-allocation from zeroing the file.
-
-extern bool g_use_regular_expressions;
 
 extern int g_row_height;
 extern int g_default_row_height;
 
-extern bool skip_list_draw;
+extern bool g_skip_list_draw;
 
 extern int g_file_size_cmb_ret;			// Message box prompt for large files sizes.
 
@@ -232,7 +266,7 @@ extern HANDLE worker_semaphore;			// Blocks shutdown while a worker thread is ac
 extern bool in_worker_thread;
 extern bool kill_worker_thread_flag;	// Allow for a clean shutdown.
 
-extern bool download_history_changed;
+extern bool g_download_history_changed;
 
 extern HANDLE downloader_ready_semaphore;
 
@@ -242,8 +276,8 @@ extern CRITICAL_SECTION session_totals_cs;
 
 extern CRITICAL_SECTION icon_cache_cs;
 
-extern wchar_t *base_directory;
-extern unsigned int base_directory_length;
+extern wchar_t *g_base_directory;
+extern unsigned int g_base_directory_length;
 
 extern wchar_t *g_program_directory;
 extern unsigned int g_program_directory_length;
@@ -313,6 +347,8 @@ extern unsigned char cfg_t_status_downloaded;	// 0 = Bytes, 1 = KB, 2 = MB, 3 = 
 extern unsigned char cfg_t_status_down_speed;	// 0 = Bytes, 1 = KB, 2 = MB, 3 = GB, etc.
 extern unsigned char cfg_t_status_speed_limit;	// 0 = Bytes, 1 = KB, 2 = MB, 3 = GB, etc.
 
+extern unsigned long long cfg_total_downloaded;
+
 extern int cfg_drop_pos_x;	// URL drop window.
 extern int cfg_drop_pos_y;	// URL drop window.
 
@@ -323,9 +359,11 @@ extern bool cfg_start_in_tray;
 extern bool cfg_show_notification;
 
 extern bool cfg_always_on_top;
+extern bool cfg_check_for_updates;
 extern bool cfg_enable_download_history;
 extern bool cfg_enable_quick_allocation;
 extern bool cfg_set_filetime;
+extern bool cfg_update_redirected;
 extern bool cfg_use_one_instance;
 extern bool cfg_enable_drop_window;
 extern bool cfg_prevent_standby;
@@ -333,6 +371,7 @@ extern bool cfg_prevent_standby;
 extern unsigned char cfg_drag_and_drop_action;
 
 extern unsigned char cfg_shutdown_action;
+extern unsigned char g_shutdown_action;
 
 extern bool cfg_play_sound;
 extern wchar_t *cfg_sound_file_path;
@@ -365,6 +404,24 @@ extern unsigned short cfg_ftp_port_start;
 extern unsigned short cfg_ftp_port_end;
 
 extern bool cfg_ftp_send_keep_alive;
+
+// SFTP
+
+extern bool cfg_sftp_enable_compression;
+extern bool cfg_sftp_attempt_gssapi_authentication;
+extern bool cfg_sftp_attempt_gssapi_key_exchange;
+extern int cfg_sftp_keep_alive_time;
+extern int cfg_sftp_rekey_time;
+extern int cfg_sftp_gss_rekey_time;
+extern unsigned long cfg_sftp_rekey_data_limit;
+
+#define KEX_ALGORITHM_COUNT		5
+#define HOST_KEY_COUNT			4
+#define ENCRYPTION_CIPHER_COUNT	6
+
+extern unsigned char cfg_priority_kex_algorithm[ KEX_ALGORITHM_COUNT ];
+extern unsigned char cfg_priority_host_key[ HOST_KEY_COUNT ];
+extern unsigned char cfg_priority_encryption_cipher[ ENCRYPTION_CIPHER_COUNT ];
 
 // Server
 
@@ -481,12 +538,20 @@ extern bool cfg_show_drop_window_progress;
 extern int cfg_sorted_column_index;
 extern unsigned char cfg_sorted_direction;
 extern bool cfg_sort_added_and_updating_items;
+extern bool cfg_expand_added_group_items;
 
 extern bool cfg_show_gridlines;
 extern bool cfg_show_part_progress;
 
+extern bool cfg_draw_full_rows;
+extern bool cfg_draw_all_rows;
+
 extern FONT_SETTINGS cfg_even_row_font_settings;
 extern FONT_SETTINGS cfg_odd_row_font_settings;
+
+extern COLORREF cfg_background_color;
+extern COLORREF cfg_gridline_color;
+extern COLORREF cfg_selection_marquee_color;
 
 extern COLORREF cfg_even_row_background_color;
 extern COLORREF cfg_odd_row_background_color;
@@ -532,6 +597,8 @@ extern COLORREF cfg_color_15a, cfg_color_15b, cfg_color_15c, cfg_color_15d, cfg_
 extern COLORREF *progress_colors[ NUM_COLORS ];
 extern COLORREF *td_progress_colors[ TD_NUM_COLORS ];
 
+extern COLORREF g_CustColors[ 16 ];
+
 extern char *download_columns[ NUM_COLUMNS ];
 extern int *download_columns_width[ NUM_COLUMNS ];
 
@@ -550,5 +617,7 @@ extern bool g_is_windows_8_or_higher;
 
 extern bool g_can_perform_shutdown_action;
 extern bool g_perform_shutdown_action;
+
+extern bool edit_from_menu;			// True if we activate the edit from our (rename) menu, or Ctrl + R.
 
 #endif

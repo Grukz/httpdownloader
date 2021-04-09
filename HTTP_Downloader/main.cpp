@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -41,13 +41,15 @@
 #include "lite_powrprof.h"
 #include "lite_normaliz.h"
 #include "lite_pcre2.h"
+#include "lite_psftp.h"
 
+#include "treelistview.h"
 #include "cmessagebox.h"
 
 #include "connection.h"
+#include "site_manager_utilities.h"
 #include "ftp_parsing.h"
-
-#include "login_manager_utilities.h"
+#include "sftp.h"
 
 #include "system_tray.h"
 
@@ -79,20 +81,22 @@ HFONT g_hFont = NULL;			// Handle to our font object.
 
 UINT CF_HTML = 0;
 
-bool g_use_regular_expressions = false;
+COLORREF g_CustColors[ 16 ];
 
 int g_row_height = 0;
 int g_default_row_height = 0;
 
-wchar_t *base_directory = NULL;
-unsigned int base_directory_length = 0;
+wchar_t *g_base_directory = NULL;
+unsigned int g_base_directory_length = 0;
 
 wchar_t *g_program_directory = NULL;
 unsigned int g_program_directory_length = 0;
 
 dllrbt_tree *g_icon_handles = NULL;
 
-dllrbt_tree *g_login_info = NULL;
+dllrbt_tree *g_site_info = NULL;
+dllrbt_tree *g_sftp_fps_host_info = NULL;
+dllrbt_tree *g_sftp_keys_host_info = NULL;
 
 bool g_can_fast_allocate = false;
 
@@ -109,6 +113,9 @@ int APIENTRY _WinMain()
 int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow )
 #endif
 {
+	MSG msg;
+	msg.wParam = 0;	// Exit code.
+
 	#ifndef NTDLL_USE_STATIC_LIB
 		HINSTANCE hInstance = GetModuleHandleW( NULL );
 	#endif
@@ -142,7 +149,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		{
 			UnInitializeZLib1();
 
-			if ( _MessageBoxW( NULL, L"The zlib compression library (zlib1.dll) could not be loaded.\r\n\r\nCompressed downloads will need to be manually decompressed.\r\n\r\nWould you like to visit www.zlib.net to download the DLL file?", PROGRAM_CAPTION, MB_APPLMODAL | MB_ICONWARNING | MB_YESNO ) == IDYES )
+			/*if ( _MessageBoxW( NULL, L"The zlib compression library (zlib1.dll) could not be loaded.\r\n\r\nCompressed downloads will need to be manually decompressed.\r\n\r\nWould you like to visit www.zlib.net to download the DLL file?", PROGRAM_CAPTION, MB_APPLMODAL | MB_ICONWARNING | MB_YESNO ) == IDYES )
 			{
 				bool destroy = true;
 				#ifndef OLE32_USE_STATIC_LIB
@@ -163,7 +170,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 				{
 					_CoUninitialize();
 				}
-			}
+			}*/
 		}
 	#endif
 	#ifndef POWRPROF_USE_STATIC_LIB
@@ -183,9 +190,11 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		{
 			UnInitializePCRE2();
 		}
-		else
+	#endif
+	#ifndef PSFTP_USE_STATIC_LIB
+		if ( !InitializePSFTP() )
 		{
-			g_use_regular_expressions = true;
+			UnInitializePSFTP();
 		}
 	#endif
 	// Loaded only for SetFileInformationByHandle and GetUserDefaultLocaleName.
@@ -210,17 +219,17 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	g_is_windows_8_or_higher = IsWindowsVersionOrGreater( HIBYTE( _WIN32_WINNT_WIN8 ), LOBYTE( _WIN32_WINNT_WIN8 ), 0 );
 
 	unsigned char fail_type = 0;
-	MSG msg;
-	_memzero( &msg, sizeof( MSG ) );
 
 	CL_ARGS *cla = NULL;
 
-	base_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * MAX_PATH );
+	g_base_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * MAX_PATH );
 
 	g_program_directory = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * MAX_PATH );
 	g_program_directory_length = GetModuleFileNameW( NULL, g_program_directory, MAX_PATH );
 	while ( g_program_directory_length != 0 && g_program_directory[ --g_program_directory_length ] != L'\\' );
 	g_program_directory[ g_program_directory_length ] = 0;	// Sanity.
+
+	bool override_shutdown_action = false;
 
 	// Get the new base directory if the user supplied a path.
 	bool default_directory = true;
@@ -231,7 +240,6 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		if ( argCount > 1 )
 		{
 			cla = ( CL_ARGS * )GlobalAlloc( GPTR, sizeof( CL_ARGS ) );
-			cla->ssl_version = -1;	// Default.
 		}
 
 		// The first parameter (index 0) is the path to the executable.
@@ -249,24 +257,24 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 					if ( GetFileAttributesW( szArgList[ arg ] ) & FILE_ATTRIBUTE_DIRECTORY )
 					{
-						base_directory_length = lstrlenW( szArgList[ arg ] );
-						if ( base_directory_length >= MAX_PATH )
+						g_base_directory_length = lstrlenW( szArgList[ arg ] );
+						if ( g_base_directory_length >= MAX_PATH )
 						{
-							base_directory_length = MAX_PATH - 1;
+							g_base_directory_length = MAX_PATH - 1;
 						}
-						_wmemcpy_s( base_directory, MAX_PATH, szArgList[ arg ], base_directory_length );
-						base_directory[ base_directory_length ] = 0;	// Sanity.
+						_wmemcpy_s( g_base_directory, MAX_PATH, szArgList[ arg ], g_base_directory_length );
+						g_base_directory[ g_base_directory_length ] = 0;	// Sanity.
 
 						default_directory = false;
 					}
 				}
 				else if ( arg_name_length == 8 && _StrCmpNIW( arg_name, L"portable", 8 ) == 0 )	// Portable mode (use the application's current directory for our base directory).
 				{
-					base_directory_length = lstrlenW( szArgList[ 0 ] );
-					while ( base_directory_length != 0 && szArgList[ 0 ][ --base_directory_length ] != L'\\' );
+					g_base_directory_length = lstrlenW( szArgList[ 0 ] );
+					while ( g_base_directory_length != 0 && szArgList[ 0 ][ --g_base_directory_length ] != L'\\' );
 
-					_wmemcpy_s( base_directory, MAX_PATH, szArgList[ 0 ], base_directory_length );
-					base_directory[ base_directory_length ] = 0;	// Sanity.
+					_wmemcpy_s( g_base_directory, MAX_PATH, szArgList[ 0 ], g_base_directory_length );
+					g_base_directory[ g_base_directory_length ] = 0;	// Sanity.
 
 					default_directory = false;
 				}
@@ -286,6 +294,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					}
 
 					cla->parts = parts;
+					cla->use_parts = true;
 				}
 				else if ( ( arg + 1 ) < argCount &&
 						  arg_name_length == 11 && _StrCmpNIW( arg_name, L"speed-limit", 11 ) == 0 )	// Download speed limit.
@@ -293,6 +302,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					++arg;
 
 					cla->download_speed_limit = ( unsigned long long )wcstoull( szArgList[ arg ] );
+					cla->use_download_speed_limit = true;
 				}
 				else if ( ( arg + 1 ) < argCount &&
 						  arg_name_length == 10 && _StrCmpNIW( arg_name, L"encryption", 10 ) == 0 )	// SSL / TLS version.
@@ -300,9 +310,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					++arg;
 
 					unsigned char version = ( unsigned char )_wcstoul( szArgList[ arg ], NULL, 10 );
-					if ( version > 4 )
+					if ( version > 5 )
 					{
-						version = 4;	// TLS 1.2
+						version = 5;	// TLS 1.2
 					}
 
 					cla->ssl_version = version;
@@ -314,11 +324,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 				else if ( arg_name_length == 11 && _StrCmpNIW( arg_name, L"add-stopped", 11 ) == 0 )	// Add the download in the Stopped state.
 				{
 					cla->download_operations |= DOWNLOAD_OPERATION_ADD_STOPPED;
-					cla->download_immediately = 1;
 				}
 				else if ( arg_name_length == 9 && _StrCmpNIW( arg_name, L"immediate", 9 ) == 0 )	// Download immediately.
 				{
-					cla->download_operations &= ~DOWNLOAD_OPERATION_ADD_STOPPED;
 					cla->download_immediately = 1;
 				}
 				else if ( ( arg + 1 ) < argCount &&
@@ -390,7 +398,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 						}
 						else if ( arg_name[ 0 ] == L'p' )
 						{
-							if ( arg_name[ 1 ] == L'o' )	// Portable
+							if ( arg_name[ 1 ] == L'o' )	// Post Data
 							{
 								cl_val = &cla->data;
 								cla->data_length = length;
@@ -420,6 +428,7 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 								cl_val = &cla->download_directory;
 								cla->download_directory_length = length;
+								cla->use_download_directory = true;
 							}
 							else
 							{
@@ -460,6 +469,114 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 						( *cl_val )[ length ] = 0;	// Sanity.
 					}
 				}
+				else if ( ( arg + 1 ) < argCount &&
+						  arg_name_length == 10 && _StrCmpNIW( arg_name, L"proxy-type", 10 ) == 0 )	// Proxy type.
+				{
+					++arg;
+
+					cla->proxy_type = ( unsigned char )_wcstoul( szArgList[ arg ], NULL, 10 );
+				}
+				else if ( ( arg + 1 ) < argCount &&
+						  arg_name_length == 16 && _StrCmpNIW( arg_name, L"proxy-ip-address", 16 ) == 0 )	// Proxy IP address.
+				{
+					++arg;
+
+					unsigned int proxy_ip_address = 0;
+
+					wchar_t *ipaddr = szArgList[ arg ];
+
+					for ( char i = 3; i >= 0; --i )
+					{
+						wchar_t *ptr = ipaddr;
+						while ( ptr != NULL && *ptr != NULL )
+						{
+							if ( *ptr == L'.' )
+							{
+								*ptr = 0;
+								++ptr;
+
+								break;
+							}
+
+							++ptr;
+						}
+
+						if ( *ptr == NULL && i > 0 )
+						{
+							break;
+						}
+
+						proxy_ip_address |= ( ( unsigned int )_wcstoul( ipaddr, NULL, 10 ) << ( 8 * i ) );
+
+						if ( *ptr == NULL && i == 0 )
+						{
+							cla->proxy_ip_address = proxy_ip_address;
+						}
+						else
+						{
+							ipaddr = ptr;
+						}
+					}
+				}
+				else if ( ( arg + 1 ) < argCount &&
+						  arg_name_length == 10 && _StrCmpNIW( arg_name, L"proxy-port", 10 ) == 0 )	// Proxy port.
+				{
+					++arg;
+
+					cla->proxy_port = ( unsigned short )_wcstoul( szArgList[ arg ], NULL, 10 );
+				}
+				else if ( arg_name_length == 26 && _StrCmpNIW( arg_name, L"proxy-resolve-domain-names", 26 ) == 0 )	// Resolve domain names.
+				{
+					cla->proxy_resolve_domain_names = true;
+				}
+				else if ( ( arg + 1 ) < argCount &&
+						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-hostname", 14 ) == 0 ) ||
+						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-username", 14 ) == 0 ) ||
+						  ( arg_name_length == 14 && _StrCmpNIW( arg_name, L"proxy-password", 14 ) == 0 ) )	// Proxy hostname, username, and password.
+				{
+					wchar_t **cl_val = NULL;
+
+					int length = lstrlenW( szArgList[ arg + 1 ] );
+					if ( length > 0 )
+					{
+						if ( arg_name[ 6 ] == L'h' )
+						{
+							cl_val = &cla->proxy_hostname;
+							cla->proxy_hostname_length = length;
+						}
+						else if ( arg_name[ 6 ] == L'u' )
+						{
+							cl_val = &cla->proxy_username;
+							cla->proxy_username_length = length;
+						}
+						else if ( arg_name[ 6 ] == L'p' )
+						{
+							cl_val = &cla->proxy_password;
+							cla->proxy_password_length = length;
+						}
+
+						++arg;	// Move to the supplied value.
+
+						if ( *cl_val != NULL )
+						{
+							GlobalFree( *cl_val );
+							*cl_val = NULL;
+						}
+
+						*cl_val = ( wchar_t * )GlobalAlloc( GMEM_FIXED, sizeof( wchar_t ) * ( length + 1 ) );
+						_wmemcpy_s( *cl_val, length + 1, szArgList[ arg ], length );
+						( *cl_val )[ length ] = 0;	// Sanity.
+					}
+				}
+				else if ( ( arg + 1 ) < argCount &&
+						  arg_name_length == 15 && _StrCmpNIW( arg_name, L"shutdown-action", 15 ) == 0 )	// Shutdown action.
+				{
+					++arg;
+
+					override_shutdown_action = true;
+
+					g_shutdown_action = ( unsigned char )_wcstoul( szArgList[ arg ], NULL, 10 );
+				}
 			}
 			else
 			{
@@ -490,40 +607,40 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	// Use our default directory if none was supplied or check if there's a "portable" file in the same directory.
 	if ( default_directory )
 	{
-		//base_directory_length = GetModuleFileNameW( NULL, base_directory, MAX_PATH );
-		//while ( base_directory_length != 0 && base_directory[ --base_directory_length ] != L'\\' );
-		//base_directory[ base_directory_length ] = 0;	// Sanity.
-		_wmemcpy_s( base_directory, MAX_PATH, g_program_directory, g_program_directory_length );
-		base_directory_length = g_program_directory_length;
-		_wmemcpy_s( base_directory + base_directory_length, MAX_PATH - base_directory_length, L"\\portable\0", 10 );
+		//g_base_directory_length = GetModuleFileNameW( NULL, g_base_directory, MAX_PATH );
+		//while ( g_base_directory_length != 0 && g_base_directory[ --g_base_directory_length ] != L'\\' );
+		//g_base_directory[ g_base_directory_length ] = 0;	// Sanity.
+		_wmemcpy_s( g_base_directory, MAX_PATH, g_program_directory, g_program_directory_length );
+		g_base_directory_length = g_program_directory_length;
+		_wmemcpy_s( g_base_directory + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\portable\0", 10 );
 
 		// If there's a portable file in the same directory, then we'll use that directory as our base.
 		// If not, then we'll use the APPDATA folder.
-		if ( GetFileAttributesW( base_directory ) == INVALID_FILE_ATTRIBUTES )
+		if ( GetFileAttributesW( g_base_directory ) == INVALID_FILE_ATTRIBUTES )
 		{
-			_SHGetFolderPathW( NULL, BASE_DIRECTORY_FLAG, NULL, 0, base_directory );
+			_SHGetFolderPathW( NULL, BASE_DIRECTORY_FLAG, NULL, 0, g_base_directory );
 
-			base_directory_length = lstrlenW( base_directory );
-			_wmemcpy_s( base_directory + base_directory_length, MAX_PATH - base_directory_length, L"\\HTTP Downloader\0", 17 );
-			base_directory_length += 16;
-			base_directory[ base_directory_length ] = 0;	// Sanity.
+			g_base_directory_length = lstrlenW( g_base_directory );
+			_wmemcpy_s( g_base_directory + g_base_directory_length, MAX_PATH - g_base_directory_length, L"\\HTTP Downloader\0", 17 );
+			g_base_directory_length += 16;
+			g_base_directory[ g_base_directory_length ] = 0;	// Sanity.
 
 			// Check to see if the new path exists and create it if it doesn't.
-			if ( GetFileAttributesW( base_directory ) == INVALID_FILE_ATTRIBUTES )
+			if ( GetFileAttributesW( g_base_directory ) == INVALID_FILE_ATTRIBUTES )
 			{
-				CreateDirectoryW( base_directory, NULL );
+				CreateDirectoryW( g_base_directory, NULL );
 			}
 		}
 		else
 		{
-			base_directory[ base_directory_length ] = 0;	// Sanity.
+			g_base_directory[ g_base_directory_length ] = 0;	// Sanity.
 		}
 	}
 
 	// Check to see if the new path exists and create it if it doesn't.
-	if ( GetFileAttributesW( base_directory ) == INVALID_FILE_ATTRIBUTES )
+	if ( GetFileAttributesW( g_base_directory ) == INVALID_FILE_ATTRIBUTES )
 	{
-		CreateDirectoryW( base_directory, NULL );
+		CreateDirectoryW( g_base_directory, NULL );
 	}
 
 	InitializeCriticalSection( &worker_cs );
@@ -541,13 +658,23 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	InitializeCriticalSection( &file_size_prompt_list_cs );
 	InitializeCriticalSection( &rename_file_prompt_list_cs );
 	InitializeCriticalSection( &last_modified_prompt_list_cs );
+	InitializeCriticalSection( &fingerprint_prompt_list_cs );
 	InitializeCriticalSection( &move_file_queue_cs );
 	InitializeCriticalSection( &cleanup_cs );
+	InitializeCriticalSection( &update_check_timeout_cs );
 
 	// Get the default message system font.
 	NONCLIENTMETRICS ncm;
 	_memzero( &ncm, sizeof( NONCLIENTMETRICS ) );
-	ncm.cbSize = sizeof( NONCLIENTMETRICS );
+	if ( IsWindowsVersionOrGreater( HIBYTE( _WIN32_WINNT_VISTA ), LOBYTE( _WIN32_WINNT_VISTA ), 0 ) )
+	{
+		ncm.cbSize = sizeof( NONCLIENTMETRICS );
+	}
+	else	// XP and earlier.
+	{
+		// https://docs.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-nonclientmetricsa
+		ncm.cbSize = sizeof( NONCLIENTMETRICS ) - sizeof( ncm.iPaddedBorderWidth );
+	}
 	_SystemParametersInfoW( SPI_GETNONCLIENTMETRICS, sizeof( NONCLIENTMETRICS ), &ncm, 0 );
 
 	//g_default_log_font = ncm.lfMessageFont;
@@ -571,6 +698,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	{
 		g_default_row_height = icon_height;
 	}
+
+	_memset( g_CustColors, 0, sizeof( COLORREF ) * 16 );
 
 	SetDefaultAppearance();
 
@@ -610,6 +739,11 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	// Once we read in our font settings, we can measure their heights to set the row height of our listview control.
 	AdjustRowHeight();
 
+	if ( !override_shutdown_action )
+	{
+		g_shutdown_action = cfg_shutdown_action;
+	}
+
 	// See if there's an instance of the program running.
 	HANDLE app_instance_mutex = OpenMutexW( MUTEX_ALL_ACCESS, 0, PROGRAM_CAPTION );
 	if ( app_instance_mutex == NULL )
@@ -642,6 +776,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					if ( cla->urls_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->urls_length + 1 ) ); }
 					if ( cla->username_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->username_length + 1 ) ); }
 					if ( cla->password_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->password_length + 1 ) ); }
+					if ( cla->proxy_hostname_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->proxy_hostname_length + 1 ) ); }
+					if ( cla->proxy_username_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->proxy_username_length + 1 ) ); }
+					if ( cla->proxy_password_length > 0 ) { data_size += ( sizeof( wchar_t ) * ( cla->proxy_password_length + 1 ) ); }
 
 					// Make a contiguous memory buffer.
 					CL_ARGS *cla_data = ( CL_ARGS * )GlobalAlloc( GMEM_FIXED, data_size );
@@ -712,6 +849,27 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 						data_offset += ( cla->password_length + 1 );
 					}
 
+					cla_data->proxy_hostname = ( wchar_t * )data_offset;
+					if ( cla->proxy_hostname_length > 0 )
+					{
+						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_hostname, cla->proxy_hostname_length + 1 );
+						data_offset += ( cla->proxy_hostname_length + 1 );
+					}
+
+					cla_data->proxy_username = ( wchar_t * )data_offset;
+					if ( cla->proxy_username_length > 0 )
+					{
+						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_username, cla->proxy_username_length + 1 );
+						data_offset += ( cla->proxy_username_length + 1 );
+					}
+
+					cla_data->proxy_password = ( wchar_t * )data_offset;
+					if ( cla->proxy_password_length > 0 )
+					{
+						_wmemcpy_s( wbyte_buf + data_offset, data_size - data_offset, cla->proxy_password, cla->proxy_password_length + 1 );
+						data_offset += ( cla->proxy_password_length + 1 );
+					}
+
 					COPYDATASTRUCT cds;
 					cds.dwData = 0;
 					cds.cbData = data_size;
@@ -730,16 +888,17 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	}
 
 	if ( cfg_enable_quick_allocation ||
-		 cfg_shutdown_action == SHUTDOWN_ACTION_RESTART ||
-		 cfg_shutdown_action == SHUTDOWN_ACTION_SLEEP ||
-		 cfg_shutdown_action == SHUTDOWN_ACTION_HIBERNATE ||
-		 cfg_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN ||
-		 cfg_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN )
+		 g_shutdown_action == SHUTDOWN_ACTION_RESTART ||
+		 g_shutdown_action == SHUTDOWN_ACTION_SLEEP ||
+		 g_shutdown_action == SHUTDOWN_ACTION_HIBERNATE ||
+		 g_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN ||
+		 g_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN )
 	{
 		// Check if we're an admin or have elevated privileges. Allow us to pre-allocate a file without zeroing it.
 		HANDLE hToken, hLinkedToken;
 		TOKEN_PRIVILEGES tp;
 		LUID luid;
+		_memzero( &luid, sizeof( LUID ) );
 
 		BOOL is_member = FALSE, is_privileged = FALSE;
 
@@ -809,11 +968,11 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 					}
 				}
 
-				if ( cfg_shutdown_action == SHUTDOWN_ACTION_RESTART ||
-					 cfg_shutdown_action == SHUTDOWN_ACTION_SLEEP ||
-					 cfg_shutdown_action == SHUTDOWN_ACTION_HIBERNATE ||
-					 cfg_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN ||
-					 cfg_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN &&
+				if ( g_shutdown_action == SHUTDOWN_ACTION_RESTART ||
+					 g_shutdown_action == SHUTDOWN_ACTION_SLEEP ||
+					 g_shutdown_action == SHUTDOWN_ACTION_HIBERNATE ||
+					 g_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN ||
+					 g_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN &&
 					 _LookupPrivilegeValueW( NULL, SE_SHUTDOWN_NAME, &luid ) )
 				{
 					tp.PrivilegeCount = 1;
@@ -1000,9 +1159,31 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 	g_icon_handles = dllrbt_create( dllrbt_compare_w );
 
-	g_login_info = dllrbt_create( dllrbt_compare_login_info );
+	g_site_info = dllrbt_create( dllrbt_compare_site_info );
+	g_sftp_fps_host_info = dllrbt_create( dllrbt_compare_sftp_fps_host_info );
+	g_sftp_keys_host_info = dllrbt_create( dllrbt_compare_sftp_keys_host_info );
 
-	read_login_info();
+	read_site_info();
+	read_sftp_fps_host_info();
+	read_sftp_keys_host_info();
+
+	if ( psftp_state == PSFTP_STATE_RUNNING )
+	{
+		_SFTP_InitGSSAPI();
+
+		_SFTP_SetConfigInfo( 0, ( cfg_sftp_enable_compression ? 1 : 0 ) );
+		_SFTP_SetConfigInfo( 1, ( cfg_sftp_attempt_gssapi_authentication ? 1 : 0 ) );
+		_SFTP_SetConfigInfo( 2, ( cfg_sftp_attempt_gssapi_key_exchange ? 1 : 0 ) );
+
+		_SFTP_SetConfigInfo( 3, cfg_sftp_keep_alive_time );
+		_SFTP_SetConfigInfo( 4, cfg_sftp_rekey_time );
+		_SFTP_SetConfigInfo( 5, cfg_sftp_gss_rekey_time );
+		_SFTP_SetConfigInfo( 6, cfg_sftp_rekey_data_limit );
+
+		_SFTP_SetAlgorithmPriorities( 0, cfg_priority_kex_algorithm, KEX_ALGORITHM_COUNT );
+		_SFTP_SetAlgorithmPriorities( 1, cfg_priority_host_key, HOST_KEY_COUNT );
+		_SFTP_SetAlgorithmPriorities( 2, cfg_priority_encryption_cipher, ENCRYPTION_CIPHER_COUNT );
+	}
 
 	downloader_ready_semaphore = CreateSemaphore( NULL, 0, 1, NULL );
 
@@ -1017,20 +1198,20 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	WNDCLASSEX wcex;
 	_memzero( &wcex, sizeof( WNDCLASSEX ) );
 	wcex.cbSize			= sizeof( WNDCLASSEX );
-	wcex.style          = 0;//CS_VREDRAW | CS_HREDRAW;
-	wcex.cbClsExtra     = 0;
-	wcex.cbWndExtra     = 0;
-	wcex.hInstance      = hInstance;
-	wcex.hIcon          = g_default_tray_icon;//_LoadIconW( hInstance, MAKEINTRESOURCE( IDI_ICON ) );
-	wcex.hCursor        = _LoadCursorW( NULL, IDC_ARROW );
-	wcex.hbrBackground  = ( HBRUSH )( COLOR_3DFACE + 1 );
-	wcex.lpszMenuName   = NULL;
-	wcex.hIconSm        = NULL;
+	wcex.style			= 0;//CS_VREDRAW | CS_HREDRAW;
+	wcex.cbClsExtra		= 0;
+	wcex.cbWndExtra		= 0;
+	wcex.hInstance		= hInstance;
+	wcex.hIcon			= g_default_tray_icon;//_LoadIconW( hInstance, MAKEINTRESOURCE( IDI_ICON ) );
+	wcex.hCursor		= _LoadCursorW( NULL, IDC_ARROW );
+	wcex.hbrBackground	= ( HBRUSH )( COLOR_3DFACE + 1 );
+	wcex.lpszMenuName	= NULL;
+	wcex.hIconSm		= NULL;
 
 	// Since the main window's children cover it up, we don't need to redraw the window.
 	// This also prevents the status bar child from flickering during a window resize. Dumb!
-	wcex.lpfnWndProc    = MainWndProc;
-	wcex.lpszClassName  = L"http_downloader_class";
+	wcex.lpfnWndProc	= MainWndProc;
+	wcex.lpszClassName	= L"http_downloader_class";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1038,9 +1219,9 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.style          = CS_VREDRAW | CS_HREDRAW;
-	wcex.lpfnWndProc    = AddURLsWndProc;
-	wcex.lpszClassName  = L"add_urls";
+//	wcex.style			= CS_VREDRAW | CS_HREDRAW;
+	wcex.lpfnWndProc	= AddURLsWndProc;
+	wcex.lpszClassName	= L"add_urls";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1048,8 +1229,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = OptionsWndProc;
-	wcex.lpszClassName  = L"options";
+	wcex.lpfnWndProc	= OptionsWndProc;
+	wcex.lpszClassName	= L"options";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1057,8 +1238,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = UpdateDownloadWndProc;
-	wcex.lpszClassName  = L"update_download";
+	wcex.lpfnWndProc	= UpdateDownloadWndProc;
+	wcex.lpszClassName	= L"update_download";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1066,8 +1247,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = SearchWndProc;
-	wcex.lpszClassName  = L"search";
+	wcex.lpfnWndProc	= SearchWndProc;
+	wcex.lpszClassName	= L"search";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1075,8 +1256,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = DownloadSpeedLimitWndProc;
-	wcex.lpszClassName  = L"download_speed_limit";
+	wcex.lpfnWndProc	= DownloadSpeedLimitWndProc;
+	wcex.lpszClassName	= L"download_speed_limit";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1084,8 +1265,17 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = LoginManagerWndProc;
-	wcex.lpszClassName  = L"login_manager";
+	wcex.lpfnWndProc	= SiteManagerWndProc;
+	wcex.lpszClassName	= L"site_manager";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= CheckForUpdatesWndProc;
+	wcex.lpszClassName	= L"check_for_updates";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1095,8 +1285,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 
 	wcex.hIcon			= NULL;
 
-	wcex.lpfnWndProc    = AdvancedTabWndProc;
-	wcex.lpszClassName  = L"advanced_tab";
+	wcex.lpfnWndProc	= AdvancedTabWndProc;
+	wcex.lpszClassName	= L"advanced_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1104,8 +1294,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = ProxyTabWndProc;
-	wcex.lpszClassName  = L"proxy_tab";
+	wcex.lpfnWndProc	= ProxyTabWndProc;
+	wcex.lpszClassName	= L"proxy_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1113,8 +1303,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = ConnectionTabWndProc;
-	wcex.lpszClassName  = L"connection_tab";
+	wcex.lpfnWndProc	= ConnectionTabWndProc;
+	wcex.lpszClassName	= L"connection_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1122,8 +1312,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = AppearanceTabWndProc;
-	wcex.lpszClassName  = L"appearance_tab";
+	wcex.lpfnWndProc	= AppearanceTabWndProc;
+	wcex.lpszClassName	= L"appearance_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1131,8 +1321,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = GeneralTabWndProc;
-	wcex.lpszClassName  = L"general_tab";
+	wcex.lpfnWndProc	= GeneralTabWndProc;
+	wcex.lpszClassName	= L"general_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1140,8 +1330,8 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = FTPTabWndProc;
-	wcex.lpszClassName  = L"ftp_tab";
+	wcex.lpfnWndProc	= FTPTabWndProc;
+	wcex.lpszClassName	= L"ftp_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1149,8 +1339,35 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		goto CLEANUP;
 	}
 
-	wcex.lpfnWndProc    = WebServerTabWndProc;
-	wcex.lpszClassName  = L"web_server_tab";
+	wcex.lpfnWndProc	= SFTPTabWndProc;
+	wcex.lpszClassName	= L"sftp_tab";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= SFTPFpsTabWndProc;
+	wcex.lpszClassName	= L"sftp_fps_tab";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= SFTPKeysTabWndProc;
+	wcex.lpszClassName	= L"sftp_keys_tab";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= WebServerTabWndProc;
+	wcex.lpszClassName	= L"web_server_tab";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1159,8 +1376,17 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 	}
 
 	wcex.style		   |= CS_DBLCLKS;
-	wcex.lpfnWndProc    = URLDropWndProc;
-	wcex.lpszClassName  = L"url_drop_window";
+	wcex.lpfnWndProc	= URLDropWndProc;
+	wcex.lpszClassName	= L"url_drop_window";
+
+	if ( !_RegisterClassExW( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
+	wcex.lpfnWndProc	= TreeListViewWndProc;
+	wcex.lpszClassName	= L"TreeListView";
 
 	if ( !_RegisterClassExW( &wcex ) )
 	{
@@ -1193,23 +1419,14 @@ int APIENTRY WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdL
 		if ( cla->url_list_file != NULL || cla->urls != NULL || cla->download_history_file != NULL )
 		{
 			// cla values will be freed here.
-			_SendMessageW( g_hWnd_main, WM_PROPAGATE, -2, ( LPARAM )cla );
+			_SendMessageW( g_hWnd_main, WM_PROPAGATE, ( WPARAM )-2, ( LPARAM )cla );
+
+			cla = NULL;	// Make sure it's not freed below.
 		}
 		else
 		{
-			if ( cla->download_directory != NULL ) { GlobalFree( cla->download_directory ); }
-			if ( cla->download_history_file != NULL ) { GlobalFree( cla->download_history_file ); }
-			if ( cla->url_list_file != NULL ) { GlobalFree( cla->url_list_file ); }
-			if ( cla->urls != NULL ) { GlobalFree( cla->urls ); }
-			if ( cla->cookies != NULL ) { GlobalFree( cla->cookies ); }
-			if ( cla->headers != NULL ) { GlobalFree( cla->headers ); }
-			if ( cla->data != NULL ) { GlobalFree( cla->data ); }
-			if ( cla->username != NULL ) { GlobalFree( cla->username ); }
-			if ( cla->password != NULL ) { GlobalFree( cla->password ); }
-			GlobalFree( cla );
+			FreeCommandLineArgs( &cla );
 		}
-
-		cla = NULL;
 	}
 
 	if ( cfg_enable_drop_window )
@@ -1236,26 +1453,24 @@ CLEANUP:
 
 	save_config();
 
-	if ( login_list_changed )
+	if ( site_list_changed )
 	{
-		save_login_info();
+		save_site_info();
 	}
 
-	if ( cla != NULL )
+	if ( sftp_fps_host_list_changed )
 	{
-		if ( cla->download_directory != NULL ) { GlobalFree( cla->download_directory ); }
-		if ( cla->download_history_file != NULL ) { GlobalFree( cla->download_history_file ); }
-		if ( cla->cookies != NULL ) { GlobalFree( cla->cookies ); }
-		if ( cla->data != NULL ) { GlobalFree( cla->data ); }
-		if ( cla->headers != NULL ) { GlobalFree( cla->headers ); }
-		if ( cla->url_list_file != NULL ) { GlobalFree( cla->url_list_file ); }
-		if ( cla->urls != NULL ) { GlobalFree( cla->urls ); }
-		if ( cla->username != NULL ) { GlobalFree( cla->username ); }
-		if ( cla->password != NULL ) { GlobalFree( cla->password ); }
-		GlobalFree( cla );
+		save_sftp_fps_host_info();
 	}
 
-	if ( base_directory != NULL ) { GlobalFree( base_directory ); }
+	if ( sftp_keys_host_list_changed )
+	{
+		save_sftp_keys_host_info();
+	}
+
+	FreeCommandLineArgs( &cla );
+
+	if ( g_base_directory != NULL ) { GlobalFree( g_base_directory ); }
 	if ( g_program_directory != NULL ) { GlobalFree( g_program_directory ); }
 	if ( cfg_default_download_directory != NULL ) { GlobalFree( cfg_default_download_directory ); }
 	if ( cfg_temp_download_directory != NULL ) { GlobalFree( cfg_temp_download_directory ); }
@@ -1326,26 +1541,51 @@ CLEANUP:
 
 	dllrbt_delete_recursively( g_icon_handles );
 
-	node = dllrbt_get_head( g_login_info );
+	node = dllrbt_get_head( g_site_info );
 	while ( node != NULL )
 	{
-		LOGIN_INFO *li = ( LOGIN_INFO * )node->val;
+		FreeSiteInfo( ( SITE_INFO ** )&( node->val ) );
 
-		if ( li != NULL )
+		node = node->next;
+	}
+
+	dllrbt_delete_recursively( g_site_info );
+
+	//
+
+	node = dllrbt_get_head( g_sftp_fps_host_info );
+	while ( node != NULL )
+	{
+		DoublyLinkedList *dll_node = ( DoublyLinkedList * )node->val;
+
+		while ( dll_node != NULL )
 		{
-			GlobalFree( li->w_host );
-			GlobalFree( li->w_username );
-			GlobalFree( li->w_password );
-			GlobalFree( li->host );
-			GlobalFree( li->username );
-			GlobalFree( li->password );
-			GlobalFree( li );
+			FreeSFTPFpsHostInfo( ( SFTP_FPS_HOST_INFO ** )&( dll_node->data ) );
+
+			DoublyLinkedList *del_node = dll_node;
+			dll_node = dll_node->next;
+
+			GlobalFree( del_node );
 		}
 
 		node = node->next;
 	}
 
-	dllrbt_delete_recursively( g_login_info );
+	dllrbt_delete_recursively( g_sftp_fps_host_info );
+
+	//
+
+	node = dllrbt_get_head( g_sftp_keys_host_info );
+	while ( node != NULL )
+	{
+		FreeSFTPKeysHostInfo( ( SFTP_KEYS_HOST_INFO ** )&( node->val ) );
+
+		node = node->next;
+	}
+
+	dllrbt_delete_recursively( g_sftp_keys_host_info );
+
+	//
 
 	if ( cfg_even_row_font_settings.font != NULL ){ _DeleteObject( cfg_even_row_font_settings.font ); }
 	if ( cfg_odd_row_font_settings.font != NULL ){ _DeleteObject( cfg_odd_row_font_settings.font ); }
@@ -1360,14 +1600,19 @@ CLEANUP:
 
 	if ( fail_type == 1 )
 	{
-		_MessageBoxW( NULL, L"Call to _RegisterClassExW failed!", PROGRAM_CAPTION, MB_ICONWARNING );
+		CMessageBoxW( NULL, L"Call to _RegisterClassExW failed!", PROGRAM_CAPTION, CMB_ICONWARNING );
 	}
 	else if ( fail_type == 2 )
 	{
-		_MessageBoxW( NULL, L"Call to CreateWindow failed!", PROGRAM_CAPTION, MB_ICONWARNING );
+		CMessageBoxW( NULL, L"Call to _CreateWindowExW failed!", PROGRAM_CAPTION, CMB_ICONWARNING );
 	}
 
 	UninitializeLocaleValues();
+
+	if ( psftp_state == PSFTP_STATE_RUNNING )
+	{
+		_SFTP_UninitGSSAPI();
+	}
 
 	DeleteCriticalSection( &context_list_cs );
 	DeleteCriticalSection( &active_download_list_cs );
@@ -1376,8 +1621,10 @@ CLEANUP:
 	DeleteCriticalSection( &file_size_prompt_list_cs );
 	DeleteCriticalSection( &rename_file_prompt_list_cs );
 	DeleteCriticalSection( &last_modified_prompt_list_cs );
+	DeleteCriticalSection( &fingerprint_prompt_list_cs );
 	DeleteCriticalSection( &move_file_queue_cs );
 	DeleteCriticalSection( &cleanup_cs );
+	DeleteCriticalSection( &update_check_timeout_cs );
 
 	DeleteCriticalSection( &ftp_listen_info_cs );
 
@@ -1390,35 +1637,35 @@ CLEANUP:
 	ReleaseMutex( app_instance_mutex );
 	CloseHandle( app_instance_mutex );
 
-	if ( cfg_shutdown_action != SHUTDOWN_ACTION_NONE && g_perform_shutdown_action )
+	if ( g_shutdown_action != SHUTDOWN_ACTION_NONE && g_perform_shutdown_action )
 	{
 		// SHTDN_REASON_FLAG_PLANNED = SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED
-		if ( cfg_shutdown_action == SHUTDOWN_ACTION_LOG_OFF )
+		if ( g_shutdown_action == SHUTDOWN_ACTION_LOG_OFF )
 		{
 			_ExitWindowsEx( EWX_LOGOFF, SHTDN_REASON_FLAG_PLANNED );
 		}
 		else if ( g_can_perform_shutdown_action )
 		{
-			if ( cfg_shutdown_action == SHUTDOWN_ACTION_RESTART )
+			if ( g_shutdown_action == SHUTDOWN_ACTION_RESTART )
 			{
 				_ExitWindowsEx( EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED );
 			}
-			else if ( cfg_shutdown_action == SHUTDOWN_ACTION_SLEEP )
+			else if ( g_shutdown_action == SHUTDOWN_ACTION_SLEEP )
 			{
 				_SetSuspendState( FALSE, FALSE, FALSE );
 			}
-			else if ( cfg_shutdown_action == SHUTDOWN_ACTION_HIBERNATE )
+			else if ( g_shutdown_action == SHUTDOWN_ACTION_HIBERNATE )
 			{
 				_SetSuspendState( TRUE, FALSE, FALSE );
 			}
-			else if ( cfg_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN )
+			else if ( g_shutdown_action == SHUTDOWN_ACTION_SHUT_DOWN )
 			{
 				if ( _ExitWindowsEx( EWX_POWEROFF, SHTDN_REASON_FLAG_PLANNED ) == 0 )
 				{
 					_ExitWindowsEx( EWX_SHUTDOWN, SHTDN_REASON_FLAG_PLANNED );
 				}
 			}
-			else if ( cfg_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN )
+			else if ( g_shutdown_action == SHUTDOWN_ACTION_HYBRID_SHUT_DOWN )
 			{
 				#define EWX_HYBRID_SHUTDOWN	0x00400000
 				_ExitWindowsEx( EWX_SHUTDOWN | EWX_HYBRID_SHUTDOWN, SHTDN_REASON_FLAG_PLANNED );
@@ -1446,6 +1693,9 @@ CLEANUP:
 
 UNLOAD_DLLS:
 
+	#ifndef PSFTP_USE_STATIC_LIB
+		UnInitializePSFTP();
+	#endif
 	#ifndef PCRE2_USE_STATIC_LIB
 		UnInitializePCRE2();
 	#endif
@@ -1488,6 +1738,7 @@ UNLOAD_DLLS:
 
 	#ifndef NTDLL_USE_STATIC_LIB
 		ExitProcess( ( UINT )msg.wParam );
+	#else
+		return ( int )msg.wParam;
 	#endif
-	return ( int )msg.wParam;
 }

@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -21,10 +21,11 @@
 
 #ifndef UXTHEME_USE_STATIC_LIB
 
-	//pOpenThemeData			_OpenThemeData;
-	//pCloseThemeData			_CloseThemeData;
-	//pDrawThemeBackground	_DrawThemeBackground;
+	pOpenThemeData			_OpenThemeData;
+	pCloseThemeData			_CloseThemeData;
+	pDrawThemeBackground	_DrawThemeBackground;
 	//pGetThemeColor			_GetThemeColor;
+	pGetThemePartSize		_GetThemePartSize;
 	pIsThemeActive			_IsThemeActive;
 	//pEnableThemeDialogTexture	_EnableThemeDialogTexture;
 	//pDrawThemeParentBackground	_DrawThemeParentBackground;
@@ -47,10 +48,11 @@
 			return false;
 		}
 
-		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_OpenThemeData, "OpenThemeData" ) )
-		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_CloseThemeData, "CloseThemeData" ) )
-		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_DrawThemeBackground, "DrawThemeBackground" ) )
+		VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_OpenThemeData, "OpenThemeData" ) )
+		VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_CloseThemeData, "CloseThemeData" ) )
+		VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_DrawThemeBackground, "DrawThemeBackground" ) )
 		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_GetThemeColor, "GetThemeColor" ) )
+		VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_GetThemePartSize, "GetThemePartSize" ) )
 		VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_IsThemeActive, "IsThemeActive" ) )
 		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_EnableThemeDialogTexture, "EnableThemeDialogTexture" ) )
 		//VALIDATE_FUNCTION_POINTER( SetFunctionPointer( hModule_uxtheme, ( void ** )&_DrawThemeParentBackground, "DrawThemeParentBackground" ) )

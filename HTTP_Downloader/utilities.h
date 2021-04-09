@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@
 //#define _WIN32_WINNT_WIN7		0x0601
 #define _WIN32_WINNT_WIN8		0x0602
 //#define _WIN32_WINNT_WINBLUE	0x0603
+#define _WIN32_WINNT_WIN10		0x0A00
 
 bool IsWindowsVersionOrGreater( WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor );
 
@@ -68,10 +69,14 @@ unsigned long get_file_extension_offset( wchar_t *filename, unsigned long length
 void GetDownloadFilePath( DOWNLOAD_INFO *di, wchar_t file_path[] );
 int GetTemporaryFilePath( DOWNLOAD_INFO *di, wchar_t file_path[] );
 
+wchar_t *GetDownloadInfoString( DOWNLOAD_INFO *di, int column, int root_index, int item_index, wchar_t *tbuf, unsigned short tbuf_size );
+
 char *escape_csv( const char *string );
 
 unsigned long long strtoull( char *str, bool base16 = false );
 unsigned long long wcstoull( wchar_t *str, bool base16 = false );
+
+int GetDomainParts( wchar_t *site, wchar_t *offsets[ 128 ] );
 
 char *GetUTF8Domain( wchar_t *domain );
 
@@ -86,6 +91,8 @@ char *html_entity_decode_a( char *str, unsigned int str_len, unsigned int *dec_l
 wchar_t *ParseHTMLClipboard( char *data );
 
 THREAD_RETURN cleanup( void *pArguments );
+
+void FreeCommandLineArgs( CL_ARGS **cla );
 
 char *CreateMD5( BYTE *input, DWORD input_len );
 void CreateCNonce( char **cnonce, DWORD *cnonce_length );

@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -24,6 +24,7 @@
 #include "doublylinkedlist.h"
 #include "dllrbt.h"
 #include "zlib.h"
+#include "lite_psftp.h"
 
 #include <mswsock.h>
 
@@ -50,9 +51,12 @@
 #define STATUS_UPDATING					0x00008000
 #define STATUS_ALLOCATING_FILE			0x00010000
 #define STATUS_MOVING_FILE				0x00020000
+#define STATUS_INPUT_REQUIRED			0x00040000	// A prompt is active.
 
 #define IS_STATUS( a, b )			( ( a ) & ( b ) )
 #define IS_STATUS_NOT( a, b )		!( ( a ) & ( b ) )
+
+#define IS_GROUP( a )				( a != a->shared_info )
 
 #define CONNECTION_NONE			0
 #define CONNECTION_KEEP_ALIVE	1
@@ -118,6 +122,17 @@
 #define DOWNLOAD_OPERATION_ADD_STOPPED			0x04
 #define DOWNLOAD_OPERATION_OVERRIDE_FILENAME	0x08
 #define DOWNLOAD_OPERATION_GET_EXTENSION		0x10
+#define DOWNLOAD_OPERATION_RENAME				0x20	// When moving from a temporary folder.
+#define DOWNLOAD_OPERATION_OVERWRITE			0x40	// When moving from a temporary folder.
+
+#define START_TYPE_NONE					0x00
+#define START_TYPE_HOST					0x01
+#define START_TYPE_GROUP				0x02
+#define START_TYPE_HOST_IN_GROUP		( START_TYPE_HOST | START_TYPE_GROUP )
+
+#define START_OPERATION_NONE			0x00
+#define START_OPERATION_CHECK_FILE		0x01	// Check if the file already exists.
+#define START_OPERATION_FORCE_PROMPT	0x02	// Force a prompt to show (when restarting skipped downloads).
 
 enum PROTOCOL
 {
@@ -127,7 +142,8 @@ enum PROTOCOL
 	PROTOCOL_RELATIVE,
 	PROTOCOL_FTP,
 	PROTOCOL_FTPS,
-	PROTOCOL_FTPES
+	PROTOCOL_FTPES,
+	PROTOCOL_SFTP
 };
 
 enum IO_OPERATION
@@ -147,7 +163,30 @@ enum IO_OPERATION
 	IO_Write,
 	IO_Shutdown,
 	IO_Close,
-	IO_KeepAlive
+	IO_KeepAlive,
+	IO_SFTPReadContent,
+	IO_SFTPWriteContent,
+	IO_SFTPResumeInit,
+	IO_SFTPResumeReadContent,
+	IO_SFTPCleanup
+};
+
+struct PROXY_INFO
+{
+	wchar_t				*hostname;
+	wchar_t				*punycode_hostname;
+	wchar_t				*w_username;
+	wchar_t				*w_password;
+	char				*username;
+	char				*password;
+	char				*auth_key;
+	unsigned long		auth_key_length;
+	unsigned long		ip_address;
+	unsigned short		port;
+	unsigned char		address_type;
+	unsigned char		type;
+	bool				use_authentication;
+	bool				resolve_domain_names;	// v4a or v5 based on type
 };
 
 struct AUTH_CREDENTIALS
@@ -220,15 +259,23 @@ struct POST_INFO
 {
 	char				*method;	// 1 = GET, 2 = POST
 	char				*urls;
+	char				*directory;
+	char				*parts;
+	char				*ssl_tls_version;
 	char				*username;
 	char				*password;
-	char				*parts;
 	char				*download_speed_limit;
-	char				*directory;
 	char				*download_operations;
 	char				*cookies;
 	char				*headers;
 	char				*data;		// For POST payloads.
+	char				*proxy_type;
+	char				*proxy_hostname_ip;
+	char				*proxy_port;
+	char				*proxy_username;
+	char				*proxy_password;
+	char				*proxy_resolve_domain_names;
+	char				*proxy_use_authentication;
 };
 
 struct SOCKET_CONTEXT;
@@ -263,6 +310,7 @@ struct SOCKET_CONTEXT
 	WSABUF				wsabuf;
 	WSABUF				write_wsabuf;
 	WSABUF				keep_alive_wsabuf;
+	WSABUF				ssh_wsabuf;
 
 	unsigned long long	content_offset;
 
@@ -280,8 +328,10 @@ struct SOCKET_CONTEXT
 
 	POST_INFO			*post_info;
 
+	SSH					*ssh;
+
 	SSL					*ssl;
-    SOCKET				socket;
+	SOCKET				socket;
 	SOCKET				listen_socket;	// Used for active (EPRT/PORT) FTP connections.
 
 	DWORD				current_bytes_read;
@@ -290,6 +340,8 @@ struct SOCKET_CONTEXT
 	unsigned int		decompressed_buf_size;
 
 	unsigned int		status;
+
+	unsigned int		ssh_state;
 
 	volatile LONG		pending_operations;
 	volatile LONG		timeout;
@@ -311,6 +363,8 @@ struct SOCKET_CONTEXT
 	unsigned char		got_filename;		// For Content-Disposition header fields. 0 = none/not found, 1 = renamed (doesn't exist), 2 = renamed (exists)
 	unsigned char		got_last_modified;	// For Last-Modified header fields. 0 = none/not found, 1 = found, 2 = prompt
 
+	unsigned char		update_status;		// Used for checking for updates. 0x00 = not checking for updates, 0x01 = checking, 0x02 = process update information.
+
 	bool				show_file_size_prompt;
 
 	bool				is_allocated;
@@ -322,8 +376,9 @@ struct SOCKET_CONTEXT
 
 struct ADD_INFO
 {
-	unsigned long long	download_speed_limit;
+	PROXY_INFO			proxy_info;
 	AUTH_CREDENTIALS	auth_info;
+	unsigned long long	download_speed_limit;
 	wchar_t				*download_directory;
 	wchar_t				*urls;
 	char				*utf8_cookies;
@@ -333,57 +388,66 @@ struct ADD_INFO
 	unsigned char		download_operations;
 	unsigned char		method;		// 1 = GET, 2 = POST
 	char				ssl_version;
+	bool				use_download_speed_limit;
+	bool				use_download_directory;
+	bool				use_parts;
 };
 
 struct RENAME_INFO
 {
 	DOWNLOAD_INFO		*di;
 	wchar_t				*filename;
-	unsigned short		filename_length;
+	unsigned int		filename_length;
 };
 
 struct DOWNLOAD_INFO
 {
 	wchar_t				file_path[ MAX_PATH ];
-	CRITICAL_SECTION	shared_cs;
+	CRITICAL_SECTION	di_cs;
 	DoublyLinkedList	download_node;		// Self reference to the active download_list.
 	DoublyLinkedList	queue_node;			// Self reference to the download_queue.
+	DoublyLinkedList	shared_info_node;	// Self reference to the shared_info host_list.
 	ULARGE_INTEGER		add_time;
 	ULARGE_INTEGER		start_time;
 	ULARGE_INTEGER		last_modified;
+	AUTH_CREDENTIALS	auth_info;
+	unsigned long long	file_size;
 	unsigned long long	last_downloaded;
 	unsigned long long	downloaded;
-	unsigned long long	file_size;
 	unsigned long long	speed;
 	unsigned long long	time_remaining;
 	unsigned long long	time_elapsed;
 	unsigned long long	download_speed_limit;
-	AUTH_CREDENTIALS	auth_info;
+	DOWNLOAD_INFO		*shared_info;
+	PROXY_INFO			*proxy_info;
 	wchar_t				*url;
-	wchar_t				*w_add_time;
+	DoublyLinkedList	*host_list;			// Other hosts that are downloading the file.
 	DoublyLinkedList	*range_list;
 	DoublyLinkedList	*print_range_list;
 	DoublyLinkedList	*range_list_end;
 	DoublyLinkedList	*range_queue;		// Inactive ranges that make up each download part.
 	DoublyLinkedList	*parts_list;		// The contexts that make up each download part.
-	HICON				*icon;
+	wchar_t				*w_add_time;
 	char				*cookies;
 	char				*headers;
 	char				*data;				// POST payload.
 	//char				*etag;
+	HICON				*icon;
 	HANDLE				hFile;
 	unsigned int		filename_offset;
 	unsigned int		file_extension_offset;
 	unsigned int		status;
-	unsigned char		parts;
-	unsigned char		active_parts;
+	unsigned short		parts;
+	unsigned short		active_parts;
 	unsigned char		parts_limit;		// This is set if we reduce an active download's parts number.
 	unsigned char		retries;			// The number of times a download has been retried.
-	unsigned char		download_operations;
 	unsigned char		method;				// 1 = GET, 2 = POST
-	unsigned char		moving_state;		// 0 = None, 1 = Moving, 2 = Cancelling
 	char				ssl_version;
 	bool				processed_header;
+	unsigned char		download_operations;
+	unsigned char		moving_state;		// 0 = None, 1 = Moving, 2 = Cancelling
+	unsigned char		hosts;
+	unsigned char		active_hosts;
 };
 
 SECURITY_STATUS SSL_WSAAccept( SOCKET_CONTEXT *context, OVERLAPPEDEX *overlapped, bool &sent );
@@ -421,21 +485,29 @@ void FreeListenContext();
 void EnableTimers( bool timer_state );
 
 DWORD WINAPI AddURL( void *add_info );
-void StartDownload( DOWNLOAD_INFO *di, bool check_if_file_exits );
+void ResetDownload( DOWNLOAD_INFO *di, unsigned char reset_type, bool reset_progress = true );
+void RestartDownload( DOWNLOAD_INFO *di, unsigned char restart_type, unsigned char start_operation );
+void StartDownload( DOWNLOAD_INFO *di, unsigned char start_type, unsigned char start_operation );
 
 dllrbt_tree *CreateFilenameTree();
 void DestroyFilenameTree( dllrbt_tree *filename_tree );
 bool RenameFile( DOWNLOAD_INFO *di, dllrbt_tree *filename_tree, wchar_t *file_path, unsigned int filename_offset, unsigned int file_extension_offset );
 
-THREAD_RETURN RenameFilePrompt( void *pArguments );
-THREAD_RETURN FileSizePrompt( void *pArguments );
-THREAD_RETURN LastModifiedPrompt( void *pArguments );
+THREAD_RETURN PromptRenameFile( void *pArguments );
+THREAD_RETURN PromptFileSize( void *pArguments );
+THREAD_RETURN PromptLastModified( void *pArguments );
+THREAD_RETURN PromptFingerprint( void *pArguments );
+
+THREAD_RETURN CheckForUpdates( void *pArguments );
 
 ICON_INFO *CacheIcon( DOWNLOAD_INFO *di, SHFILEINFO *sfi );
+void RemoveCachedIcon( DOWNLOAD_INFO *di, wchar_t *file_extension = NULL );
+
+void SetSharedInfoStatus( DOWNLOAD_INFO *shared_info );
 
 void FreePOSTInfo( POST_INFO **post_info );
-
 void FreeAuthInfo( AUTH_INFO **auth_info );
+void FreeAddInfo( ADD_INFO **add_info );
 
 void InitializeServerInfo();
 void CleanupServerInfo();
@@ -454,15 +526,19 @@ extern CRITICAL_SECTION download_queue_cs;				// Guard access to the download qu
 extern CRITICAL_SECTION file_size_prompt_list_cs;		// Guard access to the file size prompt list.
 extern CRITICAL_SECTION rename_file_prompt_list_cs;		// Guard access to the rename file prompt list.
 extern CRITICAL_SECTION last_modified_prompt_list_cs;	// Guard access to the last modified prompt list.
+extern CRITICAL_SECTION fingerprint_prompt_list_cs;		// Guard access to the file fingerprint prompt list.
 extern CRITICAL_SECTION move_file_queue_cs;				// Guard access to the move file queue.
 extern CRITICAL_SECTION cleanup_cs;
+extern CRITICAL_SECTION update_check_timeout_cs;
+
+extern HANDLE g_update_semaphore;
 
 extern LPFN_ACCEPTEX _AcceptEx;
 extern LPFN_CONNECTEX _ConnectEx;
 
 extern DoublyLinkedList *g_context_list;
 
-extern unsigned long total_downloading;
+extern unsigned long g_total_downloading;
 extern DoublyLinkedList *download_queue;
 
 extern DoublyLinkedList *active_download_list;
@@ -470,6 +546,7 @@ extern DoublyLinkedList *active_download_list;
 extern DoublyLinkedList *file_size_prompt_list;		// List of downloads that need to be prompted to continue.
 extern DoublyLinkedList *rename_file_prompt_list;	// List of downloads that need to be prompted to continue.
 extern DoublyLinkedList *last_modified_prompt_list;	// List of downloads that need to be prompted to continue.
+extern DoublyLinkedList *fingerprint_prompt_list;	// List of downloads that need to be prompted to continue.
 
 extern DoublyLinkedList *move_file_queue;			// List of downloads that need to be moved to a new folder.
 
@@ -482,6 +559,9 @@ extern int g_rename_file_cmb_ret2;	// Message box prompt to rename files.
 
 extern bool last_modified_prompt_active;
 extern int g_last_modified_cmb_ret;	// Message box prompt for modified files.
+
+extern bool fingerprint_prompt_active;
+extern int g_fingerprint_cmb_ret;	// Message box prompt for key fingerprints.
 
 extern DOWNLOAD_INFO *g_update_download_info;		// The current item that we want to update.
 
@@ -501,5 +581,12 @@ extern char *g_nonce;
 extern unsigned long g_nonce_length;
 extern char *g_opaque;
 extern unsigned long g_opaque_length;
+
+//
+
+extern bool g_waiting_for_update;
+extern unsigned long g_new_version;
+extern char *g_new_version_url;
+extern char g_update_check_state;	// 0 manual update check, 1 automatic update check
 
 #endif

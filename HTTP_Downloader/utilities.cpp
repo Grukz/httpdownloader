@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -21,6 +21,8 @@
 #include "string_tables.h"
 
 #include "lite_gdi32.h"
+
+#include "treelistview.h"
 
 int cfg_pos_x = 0;
 int cfg_pos_y = 0;
@@ -75,6 +77,8 @@ unsigned char cfg_t_status_downloaded = SIZE_FORMAT_AUTO;	// 0 = Bytes, 1 = KB, 
 unsigned char cfg_t_status_down_speed = SIZE_FORMAT_AUTO;	// 0 = Bytes, 1 = KB, 2 = MB, 3 = GB, etc.
 unsigned char cfg_t_status_speed_limit = SIZE_FORMAT_AUTO;	// 0 = Bytes, 1 = KB, 2 = MB, 3 = GB, etc.
 
+unsigned long long cfg_total_downloaded = 0;
+
 int cfg_drop_pos_x = 0;	// URL drop window.
 int cfg_drop_pos_y = 0;	// URL drop window.
 
@@ -85,9 +89,11 @@ bool cfg_start_in_tray = false;
 bool cfg_show_notification = false;
 
 bool cfg_always_on_top = false;
+bool cfg_check_for_updates = false;
 bool cfg_enable_download_history = true;
 bool cfg_enable_quick_allocation = false;
 bool cfg_set_filetime = true;
+bool cfg_update_redirected = false;
 bool cfg_use_one_instance = false;
 bool cfg_enable_drop_window = false;
 bool cfg_prevent_standby = true;
@@ -95,6 +101,7 @@ bool cfg_prevent_standby = true;
 unsigned char cfg_drag_and_drop_action = DRAG_AND_DROP_ACTION_NONE;
 
 unsigned char cfg_shutdown_action = SHUTDOWN_ACTION_NONE;
+unsigned char g_shutdown_action = SHUTDOWN_ACTION_NONE;
 
 bool cfg_play_sound = false;
 wchar_t *cfg_sound_file_path = NULL;
@@ -130,6 +137,22 @@ unsigned short cfg_ftp_port_start = 0;
 unsigned short cfg_ftp_port_end = 0;
 
 bool cfg_ftp_send_keep_alive = false;
+
+// SFTP
+
+bool cfg_sftp_enable_compression = false;
+bool cfg_sftp_attempt_gssapi_authentication = true;
+bool cfg_sftp_attempt_gssapi_key_exchange = true;
+int cfg_sftp_keep_alive_time = 0;
+int cfg_sftp_rekey_time = 60;
+int cfg_sftp_gss_rekey_time = 2;
+unsigned long cfg_sftp_rekey_data_limit = 1073741824;
+
+// 0x40 = enabled. OR it with the enum values in putty.h.
+// The order is the same as what's in the main PuTTY program.
+unsigned char cfg_priority_kex_algorithm[ KEX_ALGORITHM_COUNT ] = { 0x45, 0x43, 0x42, 0x44, 0x01 };
+unsigned char cfg_priority_host_key[ HOST_KEY_COUNT ] = { 0x44, 0x43, 0x41, 0x42 };
+unsigned char cfg_priority_encryption_cipher[ ENCRYPTION_CIPHER_COUNT ] = { 0x43, 0x46, 0x41, 0x04, 0x02, 0x05 };
 
 // Server
 
@@ -223,12 +246,19 @@ bool cfg_show_drop_window_progress = false;
 int cfg_sorted_column_index = 0;
 unsigned char cfg_sorted_direction = 0;	// Sort down.
 bool cfg_sort_added_and_updating_items = false;
+bool cfg_expand_added_group_items = false;
 
 bool cfg_show_gridlines = true;
+bool cfg_draw_full_rows = false;
+bool cfg_draw_all_rows = false;
 bool cfg_show_part_progress = false;
 
 FONT_SETTINGS cfg_even_row_font_settings = { NULL };					// COLOR_WINDOWTEXT (set in SetDefaultAppearance)
 FONT_SETTINGS cfg_odd_row_font_settings = { NULL };						// COLOR_WINDOWTEXT (set in SetDefaultAppearance)
+
+COLORREF cfg_background_color = RGB( 0xFF, 0xFF, 0xFF );				// COLOR_WINDOW (set in SetDefaultAppearance)
+COLORREF cfg_gridline_color = RGB( 0xF0, 0xF0, 0xF0 );
+COLORREF cfg_selection_marquee_color = RGB( 0x00, 0x66, 0xCC );			// COLOR_HOTLIGHT (set in SetDefaultAppearance)
 
 COLORREF cfg_even_row_background_color = RGB( 0xF7, 0xF7, 0xF7 );
 COLORREF cfg_odd_row_background_color = RGB( 0xFF, 0xFF, 0xFF );		// COLOR_WINDOW (set in SetDefaultAppearance)
@@ -326,7 +356,7 @@ HANDLE worker_semaphore = NULL;			// Blocks shutdown while a worker thread is ac
 bool in_worker_thread = false;
 bool kill_worker_thread_flag = false;	// Allow for a clean shutdown.
 
-bool download_history_changed = false;
+bool g_download_history_changed = false;
 
 bool IsWindowsVersionOrGreater( WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor )
 {
@@ -462,12 +492,13 @@ int GetColumnIndexFromVirtualIndex( int virtual_index, char *column_arr[], unsig
 
 	for ( int i = 0; i < num_columns; ++i )
 	{
-		if ( *column_arr[ i ] != -1 && *column_arr[ i ] == virtual_index )
+		if ( *column_arr[ i ] != -1 )
 		{
-			return count;
-		}
-		else if ( *column_arr[ i ] != -1 )
-		{
+			if ( *column_arr[ i ] == virtual_index )
+			{
+				return count;
+			}
+
 			++count;
 		}
 	}
@@ -498,7 +529,8 @@ void UpdateColumnOrders()
 {
 	int arr[ NUM_COLUMNS ];
 	int offset = 0;
-	_SendMessageW( g_hWnd_files, LVM_GETCOLUMNORDERARRAY, g_total_columns, ( LPARAM )arr );
+
+	_SendMessageW( g_hWnd_tlv_header, HDM_GETORDERARRAY, g_total_columns, ( LPARAM )arr );
 	for ( int i = 0; i < NUM_COLUMNS; ++i )
 	{
 		if ( *download_columns[ i ] != -1 )
@@ -518,10 +550,9 @@ void CheckColumnOrders( char *column_arr[], unsigned char num_columns )
 	}
 
 	// Look for duplicates, or values that are out of range.
-	unsigned char *is_set = ( unsigned char * )GlobalAlloc( GMEM_FIXED, sizeof( unsigned char ) * num_columns );
-	_memzero( is_set, sizeof( unsigned char ) * num_columns );
+	unsigned char *is_set = ( unsigned char * )GlobalAlloc( GPTR, sizeof( unsigned char ) * num_columns );
 
-	// Check ever other column.
+	// Check every other column.
 	for ( int i = 1; i < num_columns; ++i )
 	{
 		if ( *column_arr[ i ] != -1 )
@@ -580,7 +611,10 @@ void SetDefaultAppearance()
 
 	cfg_even_row_highlight_color = cfg_odd_row_highlight_color = ( COLORREF )_GetSysColor( COLOR_HIGHLIGHT );
 
-	cfg_odd_row_background_color = ( COLORREF )_GetSysColor( COLOR_WINDOW );
+	cfg_background_color = cfg_odd_row_background_color = ( COLORREF )_GetSysColor( COLOR_WINDOW );
+
+	// Windows XP's color is different. Let's just hardcode it.
+	//cfg_selection_marquee_color = ( COLORREF )_GetSysColor( COLOR_HOTLIGHT );
 
 	cfg_color_1b = cfg_odd_row_background_color;
 	cfg_color_2b = cfg_odd_row_background_color;
@@ -964,10 +998,10 @@ void GetDownloadFilePath( DOWNLOAD_INFO *di, wchar_t file_path[] )
 {
 	if ( di != NULL )
 	{
-		_wmemcpy_s( file_path, MAX_PATH, di->file_path, MAX_PATH );
-		if ( di->filename_offset > 0 )
+		_wmemcpy_s( file_path, MAX_PATH, di->shared_info->file_path, MAX_PATH );
+		if ( di->shared_info->filename_offset > 0 )
 		{
-			file_path[ di->filename_offset - 1 ] = L'\\';	// Replace the download directory NULL terminator with a directory slash.
+			file_path[ di->shared_info->filename_offset - 1 ] = L'\\';	// Replace the download directory NULL terminator with a directory slash.
 		}
 	}
 }
@@ -978,15 +1012,47 @@ int GetTemporaryFilePath( DOWNLOAD_INFO *di, wchar_t file_path[] )
 
 	if ( di != NULL )
 	{
-		filename_length = lstrlenW( di->file_path + di->filename_offset );
+		filename_length = lstrlenW( di->shared_info->file_path + di->shared_info->filename_offset );
 
 		_wmemcpy_s( file_path, MAX_PATH, cfg_temp_download_directory, g_temp_download_directory_length );
 		file_path[ g_temp_download_directory_length ] = L'\\';	// Replace the download directory NULL terminator with a directory slash.
-		_wmemcpy_s( file_path + ( g_temp_download_directory_length + 1 ), MAX_PATH - ( g_temp_download_directory_length - 1 ), di->file_path + di->filename_offset, filename_length );
+		_wmemcpy_s( file_path + ( g_temp_download_directory_length + 1 ), MAX_PATH - ( g_temp_download_directory_length - 1 ), di->shared_info->file_path + di->shared_info->filename_offset, filename_length );
 		file_path[ g_temp_download_directory_length + filename_length + 1 ] = 0;	// Sanity.
 	}
 
 	return filename_length;
+}
+
+int GetDomainParts( wchar_t *site, wchar_t *offsets[ 128 ] )
+{
+	int count = 0;
+	wchar_t *ptr = site;
+	wchar_t *ptr_s = ptr;
+
+	while ( ptr != NULL && count < 127 )
+	{
+		if ( *ptr == L'.' )
+		{
+			offsets[ count++ ] = ptr_s;
+
+			ptr_s = ptr + 1;
+		}
+		else if ( *ptr == NULL )
+		{
+			offsets[ count++ ] = ptr_s;
+
+			break;
+		}
+
+		++ptr;
+	}
+
+	if ( ptr != NULL )
+	{
+		offsets[ count ] = ptr;	// End of string.
+	}
+
+	return count;
 }
 
 char *GetUTF8Domain( wchar_t *domain )
@@ -1229,7 +1295,7 @@ wchar_t *url_encode_w( wchar_t *str, unsigned int str_len, unsigned int *enc_len
 			 ( *pstr >= 0x00 && *pstr <= 0x1F ) )
 		{
 			*pbuf++ = L'%';
-			*pbuf++ = to_hex_w( *pstr >> 4 );
+			*pbuf++ = to_hex_w( ( char )( *pstr >> 4 ) );
 			*pbuf++ = to_hex_w( *pstr & 15 );
 		}
 		else
@@ -1425,7 +1491,7 @@ void kill_worker_thread()
 }
 
 // This will allow our main thread to continue while secondary threads finish their processing.
-THREAD_RETURN cleanup( void *pArguments )
+THREAD_RETURN cleanup( void * /*pArguments*/ )
 {
 	kill_worker_thread();
 
@@ -1433,7 +1499,30 @@ THREAD_RETURN cleanup( void *pArguments )
 	_SendMessageW( g_hWnd_main, WM_DESTROY_ALT, 0, 0 );
 
 	_ExitThread( 0 );
-	return 0;
+	//return 0;
+}
+
+void FreeCommandLineArgs( CL_ARGS **cla )
+{
+	if ( *cla != NULL )
+	{
+		if ( ( *cla )->download_directory ) { GlobalFree( ( *cla )->download_directory ); }
+		if ( ( *cla )->download_history_file ) { GlobalFree( ( *cla )->download_history_file ); }
+		if ( ( *cla )->url_list_file ) { GlobalFree( ( *cla )->url_list_file ); }
+		if ( ( *cla )->urls ) { GlobalFree( ( *cla )->urls ); }
+		if ( ( *cla )->cookies ) { GlobalFree( ( *cla )->cookies ); }
+		if ( ( *cla )->headers ) { GlobalFree( ( *cla )->headers ); }
+		if ( ( *cla )->data ) { GlobalFree( ( *cla )->data ); }
+		if ( ( *cla )->username ) { GlobalFree( ( *cla )->username ); }
+		if ( ( *cla )->password ) { GlobalFree( ( *cla )->password ); }
+		if ( ( *cla )->proxy_hostname ) { GlobalFree( ( *cla )->proxy_hostname ); }
+		if ( ( *cla )->proxy_username ) { GlobalFree( ( *cla )->proxy_username ); }
+		if ( ( *cla )->proxy_password ) { GlobalFree( ( *cla )->proxy_password ); }
+
+		GlobalFree( *cla );
+
+		*cla = NULL;
+	}
 }
 
 char *CreateMD5( BYTE *input, DWORD input_len )
@@ -1858,12 +1947,12 @@ bool VerifyDigestAuthorization( char *username, unsigned long username_length, c
 		return false;
 	}
 
-	if ( client_nonce_length != nonce_length || _StrCmpNA( auth_info->nonce, nonce, nonce_length ) != 0 )
+	if ( ( unsigned long )client_nonce_length != nonce_length || _StrCmpNA( auth_info->nonce, nonce, nonce_length ) != 0 )
 	{
 		return false;
 	}
 
-	if ( client_opaque_length != opaque_length || _StrCmpNA( auth_info->opaque, opaque, opaque_length ) != 0 )
+	if ( ( unsigned long )client_opaque_length != opaque_length || _StrCmpNA( auth_info->opaque, opaque, opaque_length ) != 0 )
 	{
 		return false;
 	}
@@ -1989,7 +2078,7 @@ bool VerifyDigestAuthorization( char *username, unsigned long username_length, c
 
 	if ( response != NULL )
 	{
-		if ( response_length == client_response_length && _StrCmpNA( response, auth_info->response, response_length ) == 0 )
+		if ( response_length == ( DWORD )client_response_length && _StrCmpNA( response, auth_info->response, response_length ) == 0 )
 		{
 			ret = true;
 		}
@@ -2031,6 +2120,26 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 
 	AdjustConstructBufferSize( context, request_length, context->request_info.host );
 
+	char use_http_proxy =  ( cfg_enable_proxy ? 1 : 0 );
+	char use_https_proxy = ( cfg_enable_proxy_s ? 1 : 0 );
+
+	PROXY_INFO *pi = NULL;
+
+	if ( context->download_info != NULL &&
+	     context->download_info->proxy_info != NULL )
+	{
+		pi = context->download_info->proxy_info;
+
+		if ( pi->type == 1 )
+		{
+			use_http_proxy = 2;
+		}
+		else if ( pi->type == 2 )
+		{
+			use_https_proxy = 2;
+		}
+	}
+
 	if ( use_connect )
 	{
 		request_length += __snprintf( context->wsabuf.buf + request_length, context->buffer_size - request_length,
@@ -2052,7 +2161,7 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 			request_length += 4;
 		}
 
-		if ( cfg_enable_proxy || cfg_enable_proxy_s )
+		if ( use_http_proxy || use_https_proxy )
 		{
 			if ( context->request_info.protocol == PROTOCOL_HTTPS )
 			{
@@ -2126,6 +2235,7 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 
 		// If we're working with a range, then set it.
 		if ( context->parts > 1 ||
+		   ( context->download_info != NULL && IS_GROUP( context->download_info ) ) ||
 		   ( context->header_info.range_info->range_start > 0 &&
 			 context->header_info.range_info->range_end > 0 ) )
 		{
@@ -2248,25 +2358,47 @@ void ConstructRequest( SOCKET_CONTEXT *context, bool use_connect )
 	char *proxy_auth_username = NULL;
 	char *proxy_auth_password = NULL;
 
-	if ( cfg_enable_proxy && context->request_info.protocol == PROTOCOL_HTTP )
+	if ( use_http_proxy && context->request_info.protocol == PROTOCOL_HTTP )
 	{
-		proxy_auth_key = g_proxy_auth_key;
-		proxy_auth_key_length = g_proxy_auth_key_length;
+		if ( use_http_proxy == 2 && pi != NULL )
+		{
+			proxy_auth_key = pi->auth_key;
+			proxy_auth_key_length = pi->auth_key_length;
 
-		proxy_auth_username = g_proxy_auth_username;
-		proxy_auth_password = g_proxy_auth_password;
+			proxy_auth_username = pi->username;
+			proxy_auth_password = pi->password;
+		}
+		else
+		{
+			proxy_auth_key = g_proxy_auth_key;
+			proxy_auth_key_length = g_proxy_auth_key_length;
+
+			proxy_auth_username = g_proxy_auth_username;
+			proxy_auth_password = g_proxy_auth_password;
+		}
 	}
-	else if ( cfg_enable_proxy_s && context->request_info.protocol == PROTOCOL_HTTPS )
+	else if ( use_https_proxy && context->request_info.protocol == PROTOCOL_HTTPS )
 	{
-		proxy_auth_key = g_proxy_auth_key_s;
-		proxy_auth_key_length = g_proxy_auth_key_length_s;
+		if ( use_https_proxy == 2 && pi != NULL )
+		{
+			proxy_auth_key = pi->auth_key;
+			proxy_auth_key_length = pi->auth_key_length;
 
-		proxy_auth_username = g_proxy_auth_username_s;
-		proxy_auth_password = g_proxy_auth_password_s;
+			proxy_auth_username = pi->username;
+			proxy_auth_password = pi->password;
+		}
+		else
+		{
+			proxy_auth_key = g_proxy_auth_key_s;
+			proxy_auth_key_length = g_proxy_auth_key_length_s;
+
+			proxy_auth_username = g_proxy_auth_username_s;
+			proxy_auth_password = g_proxy_auth_password_s;
+		}
 	}
 
-	if ( ( cfg_enable_proxy && context->request_info.protocol == PROTOCOL_HTTP ) ||
-		 ( cfg_enable_proxy_s && context->request_info.protocol == PROTOCOL_HTTPS ) )
+	if ( ( use_http_proxy && context->request_info.protocol == PROTOCOL_HTTP ) ||
+		 ( use_https_proxy && context->request_info.protocol == PROTOCOL_HTTPS ) )
 	{
 		if ( context->header_info.proxy_digest_info != NULL )
 		{
@@ -2358,7 +2490,61 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 
 	unsigned int dstip = 0x01000000;	// Last byte needs to be non-zero. IP should be invalid so it doesn't get handled.
 
-	if ( cfg_socks_type == SOCKS_TYPE_V4 )	// SOCKS 4
+	char _socks_type = -1;
+	bool _resolve_domain_names = false;
+	bool _use_authentication = false;
+
+	char *proxy_auth_username = NULL;
+	char *proxy_auth_password = NULL;
+
+	if ( context->download_info != NULL &&
+	     context->download_info->proxy_info != NULL )
+	{
+		PROXY_INFO *pi = context->download_info->proxy_info;
+
+		if ( pi->type == 3 )
+		{
+			_socks_type = SOCKS_TYPE_V4;
+			_resolve_domain_names = pi->resolve_domain_names;
+
+			proxy_auth_username = pi->username;
+		}
+		else if ( pi->type == 4 )
+		{
+			_socks_type = SOCKS_TYPE_V5;
+			_resolve_domain_names = pi->resolve_domain_names;
+			_use_authentication = pi->use_authentication;
+
+			proxy_auth_username = pi->username;
+			proxy_auth_password = pi->password;
+		}
+		else
+		{
+			_socks_type = -1;
+		}
+	}
+
+	if ( _socks_type == -1 )
+	{
+		_socks_type = cfg_socks_type;
+
+		if ( cfg_socks_type == SOCKS_TYPE_V4 )
+		{
+			_resolve_domain_names = cfg_resolve_domain_names_v4a;
+
+			proxy_auth_username = g_proxy_auth_ident_username_socks;
+		}
+		else if ( cfg_socks_type == SOCKS_TYPE_V5 )
+		{
+			_resolve_domain_names = cfg_resolve_domain_names;
+			_use_authentication = cfg_use_authentication_socks;
+
+			proxy_auth_username = g_proxy_auth_username_socks;
+			proxy_auth_password = g_proxy_auth_password_socks;
+		}
+	}
+
+	if ( _socks_type == SOCKS_TYPE_V4 )	// SOCKS 4
 	{
 		if ( request_type == 0 )	// Handshake
 		{
@@ -2369,7 +2555,7 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, &nb_port, sizeof( unsigned short ) );
 			request_length += sizeof( unsigned short );
 
-			if ( cfg_resolve_domain_names_v4a )
+			if ( _resolve_domain_names )
 			{
 				// The last byte needs to be non-zero for the domain resolve to occur: 0.0.0.x 
 				_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, &dstip, sizeof( unsigned int ) );
@@ -2398,12 +2584,12 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 				}
 			}
 
-			unsigned char username_length = ( unsigned char )lstrlenA( g_proxy_auth_ident_username_socks ) + 1;	// Include the NULL character.
+			unsigned char username_length = ( unsigned char )lstrlenA( proxy_auth_username ) + 1;	// Include the NULL character.
 
-			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, g_proxy_auth_ident_username_socks, username_length );
+			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, proxy_auth_username, username_length );
 			request_length += username_length;
 
-			if ( cfg_resolve_domain_names_v4a )
+			if ( _resolve_domain_names )
 			{
 				int host_length = ( int )lstrlenA( context->request_info.host ) + 1;	// Include the NULL character.
 
@@ -2412,14 +2598,13 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 			}
 		}
 	}
-	else if ( cfg_socks_type == SOCKS_TYPE_V5 )	// SOCKS 5
+	else if ( _socks_type == SOCKS_TYPE_V5 )	// SOCKS 5
 	{
-
 		if ( request_type == 0 )		// Authentication request.
 		{
 			context->wsabuf.buf[ request_length++ ] = 0x05;	// Version
 
-			if ( cfg_use_authentication_socks )
+			if ( _use_authentication )
 			{
 				context->wsabuf.buf[ request_length++ ] = 0x02;	// Number of methods
 			}
@@ -2430,7 +2615,7 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 
 			context->wsabuf.buf[ request_length++ ] = 0x00;	// Method: None
 
-			if ( cfg_use_authentication_socks )
+			if ( _use_authentication )
 			{
 				context->wsabuf.buf[ request_length++ ] = 0x02;	// Method: Username and Password
 			}
@@ -2441,7 +2626,7 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 			context->wsabuf.buf[ request_length++ ] = 0x01;	// TCP/IP stream connection
 			context->wsabuf.buf[ request_length++ ] = 0x00;	// Reserved
 
-			if ( cfg_resolve_domain_names )
+			if ( _resolve_domain_names )
 			{
 				context->wsabuf.buf[ request_length++ ] = 0x03;	// Domain name.
 
@@ -2517,15 +2702,15 @@ void ConstructSOCKSRequest( SOCKET_CONTEXT *context, unsigned char request_type 
 		}
 		else if ( request_type == 2 )
 		{
-			unsigned char username_length = ( unsigned char )lstrlenA( g_proxy_auth_username_socks );
-			unsigned char password_length = ( unsigned char )lstrlenA( g_proxy_auth_password_socks );
+			unsigned char username_length = ( unsigned char )lstrlenA( proxy_auth_username );
+			unsigned char password_length = ( unsigned char )lstrlenA( proxy_auth_password );
 
 			context->wsabuf.buf[ request_length++ ] = 0x01;	// Username/Password version
 			context->wsabuf.buf[ request_length++ ] = username_length;
-			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, g_proxy_auth_username_socks, username_length );
+			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, proxy_auth_username, username_length );
 			request_length += username_length;
 			context->wsabuf.buf[ request_length++ ] = password_length;
-			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, g_proxy_auth_password_socks, password_length );
+			_memcpy_s( context->wsabuf.buf + request_length, context->buffer_size - request_length, proxy_auth_password, password_length );
 			request_length += password_length;
 		}
 	}

@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -173,7 +173,7 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 			//
 
-			HWND hWnd_static_proxy_hoz1 = _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 116, rc.right, 1, hWnd, NULL, NULL, NULL );
+			/*HWND hWnd_static_proxy_hoz1 =*/ _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 116, rc.right, 1, hWnd, NULL, NULL, NULL );
 
 			//
 
@@ -207,7 +207,7 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 			//
 
 
-			HWND hWnd_static_proxy_hoz2 = _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 242, rc.right, 1, hWnd, NULL, NULL, NULL );
+			/*HWND hWnd_static_proxy_hoz2 =*/ _CreateWindowW( WC_STATIC, NULL, SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 0, 242, rc.right, 1, hWnd, NULL, NULL, NULL );
 
 			//
 
@@ -220,7 +220,7 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 			g_hWnd_chk_type_ip_address_socks = _CreateWindowW( WC_BUTTON, ST_V_IPv4_address_, BS_AUTORADIOBUTTON | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 205, 272, 110, 20, hWnd, ( HMENU )BTN_TYPE_IP_ADDRESS_SOCKS, NULL, NULL );
 
 			g_hWnd_hostname_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_EDIT, NULL, ES_AUTOHSCROLL | ES_CENTER | WS_CHILD | WS_TABSTOP | WS_VISIBLE, 0, 292, 310, 23, hWnd, ( HMENU )EDIT_HOST_SOCKS, NULL, NULL );
-			g_hWnd_ip_address_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, 0, 292, 310, 23, hWnd, ( HMENU )EDIT_IP_ADDRESS_S, NULL, NULL );
+			g_hWnd_ip_address_socks = _CreateWindowExW( WS_EX_CLIENTEDGE, WC_IPADDRESS, NULL, WS_CHILD | WS_TABSTOP, 0, 292, 310, 23, hWnd, ( HMENU )EDIT_IP_ADDRESS_SOCKS, NULL, NULL );
 
 
 			g_hWnd_static_colon_socks = _CreateWindowW( WC_STATIC, ST_V_COLON, SS_CENTER | WS_CHILD | WS_VISIBLE, 310, 296, 10, 15, hWnd, NULL, NULL, NULL );
@@ -880,5 +880,5 @@ LRESULT CALLBACK ProxyTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 		}
 		break;
 	}
-	return TRUE;
+	//return TRUE;
 }

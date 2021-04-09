@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -270,8 +270,8 @@ void Set_Window_Settings()
 
 LRESULT CALLBACK WebServerTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-    switch ( msg )
-    {
+	switch ( msg )
+	{
 		case WM_CREATE:
 		{
 			RECT rc;
@@ -560,12 +560,13 @@ LRESULT CALLBACK WebServerTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 
 				case BTN_SERVER_ENABLE_SSL:
 				{
+					char port[ 6 ];
+
 					if ( _SendMessageW( g_hWnd_chk_server_enable_ssl, BM_GETCHECK, 0, 0 ) == BST_CHECKED )
 					{
 						// Revert to saved port of ssl is already enabled.
 						if ( cfg_server_enable_ssl )
 						{
-							char port[ 6 ];
 							_memzero( port, sizeof( char ) * 6 );
 							__snprintf( port, 6, "%hu", cfg_server_port );
 							_SendMessageA( g_hWnd_server_port, WM_SETTEXT, 0, ( LPARAM )port );
@@ -581,7 +582,6 @@ LRESULT CALLBACK WebServerTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 						// Revert to saved port if ssl is disabled.
 						if ( !cfg_server_enable_ssl )
 						{
-							char port[ 6 ];
 							_memzero( port, sizeof( char ) * 6 );
 							__snprintf( port, 6, "%hu", cfg_server_port );
 							_SendMessageA( g_hWnd_server_port, WM_SETTEXT, 0, ( LPARAM )port );
@@ -825,5 +825,5 @@ LRESULT CALLBACK WebServerTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
 		}
 		break;
 	}
-	return TRUE;
+	//return TRUE;
 }

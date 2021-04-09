@@ -1,6 +1,6 @@
 /*
-	HTTP Downloader can download files through HTTP(S) and FTP(S) connections.
-	Copyright (C) 2015-2020 Eric Kutcher
+	HTTP Downloader can download files through HTTP(S), FTP(S), and SFTP connections.
+	Copyright (C) 2015-2021 Eric Kutcher
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -31,6 +31,10 @@ extern wchar_t *t_temp_download_directory;
 
 extern FONT_SETTINGS t_odd_row_font_settings;
 extern FONT_SETTINGS t_even_row_font_settings;
+
+extern COLORREF t_background_color;
+extern COLORREF t_gridline_color;
+extern COLORREF t_selection_marquee_color;
 
 extern COLORREF t_odd_row_background_color;
 extern COLORREF t_even_row_background_color;
@@ -65,6 +69,9 @@ extern HWND g_hWnd_appearance_tab;
 extern HWND g_hWnd_connection_tab;
 extern HWND g_hWnd_web_server_tab;
 extern HWND g_hWnd_ftp_tab;
+extern HWND g_hWnd_sftp_tab;
+extern HWND g_hWnd_sftp_fps_tab;
+extern HWND g_hWnd_sftp_keys_tab;
 extern HWND g_hWnd_proxy_tab;
 extern HWND g_hWnd_advanced_tab;
 
@@ -138,6 +145,19 @@ extern HWND g_hWnd_ftp_port_start;
 extern HWND g_hWnd_ftp_port_end;
 
 extern HWND g_hWnd_chk_send_keep_alive;
+
+// SFTP Tab
+extern HWND g_hWnd_chk_enable_compression;
+extern HWND g_hWnd_chk_attempt_gssapi_authentication;
+extern HWND g_hWnd_chk_attempt_gssapi_key_exchange;
+extern HWND g_hWnd_sftp_keep_alive_time;
+extern HWND g_hWnd_sftp_rekey_time;
+extern HWND g_hWnd_sftp_gss_rekey_time;
+extern HWND g_hWnd_sftp_rekey_data_limit;
+
+extern unsigned char g_priority_kex_algorithm[ KEX_ALGORITHM_COUNT ];
+extern unsigned char g_priority_host_key[ HOST_KEY_COUNT ];
+extern unsigned char g_priority_encryption_cipher[ ENCRYPTION_CIPHER_COUNT ];
 
 // Proxy Tab
 // HTTP proxy
@@ -213,6 +233,7 @@ extern HWND g_hWnd_chk_start_in_tray;
 extern HWND g_hWnd_chk_show_notification;
 
 extern HWND g_hWnd_chk_always_on_top;
+extern HWND g_hWnd_chk_check_for_updates_startup;
 extern HWND g_hWnd_chk_enable_drop_window;
 extern HWND g_hWnd_drop_window_transparency;
 
@@ -227,6 +248,7 @@ extern HWND g_hWnd_chk_show_drop_window_progress;
 extern HWND g_hWnd_chk_download_history;
 extern HWND g_hWnd_chk_quick_allocation;
 extern HWND g_hWnd_chk_set_filetime;
+extern HWND g_hWnd_chk_update_redirected;
 extern HWND g_hWnd_chk_use_one_instance;
 extern HWND g_hWnd_chk_prevent_standby;
 extern HWND g_hWnd_chk_resume_downloads;
@@ -252,9 +274,12 @@ extern HWND g_hWnd_thread_count;
 // Appearance Tab
 
 extern HWND g_hWnd_chk_show_gridlines;
+extern HWND g_hWnd_chk_draw_full_rows;
+extern HWND g_hWnd_chk_draw_all_rows;
 extern HWND g_hWnd_chk_show_part_progress;
 
 extern HWND g_hWnd_chk_sort_added_and_updating_items;
+extern HWND g_hWnd_chk_expand_added_group_items;
 
 //
 

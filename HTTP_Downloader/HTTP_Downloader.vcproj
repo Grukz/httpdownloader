@@ -57,7 +57,7 @@
 				RuntimeLibrary="3"
 				BufferSecurityCheck="false"
 				UsePrecompiledHeader="0"
-				WarningLevel="3"
+				WarningLevel="4"
 				DebugInformationFormat="4"
 			/>
 			<Tool
@@ -138,7 +138,7 @@
 				RuntimeLibrary="3"
 				BufferSecurityCheck="false"
 				UsePrecompiledHeader="0"
-				WarningLevel="3"
+				WarningLevel="4"
 				DebugInformationFormat="3"
 			/>
 			<Tool
@@ -226,6 +226,7 @@
 				UsePrecompiledHeader="0"
 				WarningLevel="3"
 				DebugInformationFormat="0"
+				CallingConvention="0"
 				OmitDefaultLibName="true"
 			/>
 			<Tool
@@ -317,6 +318,7 @@
 				UsePrecompiledHeader="0"
 				WarningLevel="3"
 				DebugInformationFormat="0"
+				CallingConvention="0"
 				OmitDefaultLibName="true"
 			/>
 			<Tool
@@ -458,6 +460,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\lite_psftp.cpp"
+				>
+			</File>
+			<File
 				RelativePath=".\lite_rpcrt4.cpp"
 				>
 			</File>
@@ -486,15 +492,19 @@
 				>
 			</File>
 			<File
-				RelativePath=".\login_manager_utilities.cpp"
-				>
-			</File>
-			<File
 				RelativePath=".\main.cpp"
 				>
 			</File>
 			<File
 				RelativePath=".\menus.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\sftp.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\site_manager_utilities.cpp"
 				>
 			</File>
 			<File
@@ -510,11 +520,19 @@
 				>
 			</File>
 			<File
+				RelativePath=".\treelistview.cpp"
+				>
+			</File>
+			<File
 				RelativePath=".\utilities.cpp"
 				>
 			</File>
 			<File
 				RelativePath=".\wnd_proc_add.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\wnd_proc_check_for_updates.cpp"
 				>
 			</File>
 			<File
@@ -526,7 +544,7 @@
 				>
 			</File>
 			<File
-				RelativePath=".\wnd_proc_login_manager.cpp"
+				RelativePath=".\wnd_proc_fingerprint_prompt.cpp"
 				>
 			</File>
 			<File
@@ -562,11 +580,27 @@
 				>
 			</File>
 			<File
+				RelativePath=".\wnd_proc_options_sftp.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\wnd_proc_options_sftp_fps.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\wnd_proc_options_sftp_keys.cpp"
+				>
+			</File>
+			<File
 				RelativePath=".\wnd_proc_options_web_server.cpp"
 				>
 			</File>
 			<File
 				RelativePath=".\wnd_proc_search.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\wnd_proc_site_manager.cpp"
 				>
 			</File>
 			<File
@@ -784,6 +818,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\lite_psftp.h"
+				>
+			</File>
+			<File
 				RelativePath=".\lite_rpcrt4.h"
 				>
 			</File>
@@ -812,10 +850,6 @@
 				>
 			</File>
 			<File
-				RelativePath=".\login_manager_utilities.h"
-				>
-			</File>
-			<File
 				RelativePath=".\menus.h"
 				>
 			</File>
@@ -832,6 +866,14 @@
 				>
 			</File>
 			<File
+				RelativePath=".\sftp.h"
+				>
+			</File>
+			<File
+				RelativePath=".\site_manager_utilities.h"
+				>
+			</File>
+			<File
 				RelativePath=".\ssl.h"
 				>
 			</File>
@@ -845,6 +887,10 @@
 			</File>
 			<File
 				RelativePath=".\taskbar.h"
+				>
+			</File>
+			<File
+				RelativePath=".\treelistview.h"
 				>
 			</File>
 			<File
